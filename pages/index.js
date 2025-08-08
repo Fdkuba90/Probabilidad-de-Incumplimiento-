@@ -1,3 +1,4 @@
+// confirmación de ruta correcta
 import FileUploader from '../components/FileUploader';
 
 export default function Home() {
