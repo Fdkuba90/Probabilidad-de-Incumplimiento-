@@ -14,8 +14,8 @@ export default function Home() {
     if (file) {
       setFileName(file.name);
       // Aquí irá la lógica real de lectura de PDF
-      setPuntaje(720);
-      setPI("2.16%");
+      setPuntaje(720); // Simulado
+      setPI("2.16%");   // Simulado
     }
   };
 
