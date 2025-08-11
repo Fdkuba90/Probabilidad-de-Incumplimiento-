@@ -8,27 +8,36 @@ export const config = { api: { bodyParser: false } };
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
-/* ---------------- Puntuación & PI ---------------- */
+/* ---------- Puntuación & PI ---------- */
 function puntuar(val) {
   const pts = {};
-  pts[1]  = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
 
+  // ID 1
+  pts[1] = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
+
+  // ID 6
   if (val[6] === "--" || val[6] == null) pts[6] = 52;
   else pts[6] = val[6] >= 0.93 ? 71 : val[6] >= 0.81 ? 54 : 17;
 
-  pts[9]  = Number(val[9]) === 0 ? 54 : -19;
+  // ID 9
+  pts[9] = Number(val[9]) === 0 ? 54 : -19;
 
+  // ID 11
   if (val[11] === "--" || val[11] == null) pts[11] = 55;
   else pts[11] = Number(val[11]) === 0 ? 57 : 30;
 
+  // ID 14
   pts[14] = Number(val[14]) === 0 ? 55 : -29;
 
+  // ID 15 (ya viene convertido a UDIS en valores._udis)
   const udis = Number(val._udis) || 0;
   pts[15] = udis >= 1_000_000 ? 112 : 52;
 
+  // ID 16
   const m = Number(val[16]) || 0;
   pts[16] = m < 24 ? 41 : m < 36 ? 51 : m < 48 ? 60 : m < 98 ? 60 : m < 120 ? 61 : 67;
 
+  // ID 17
   const mLast = Number(val[17]) || 0;
   pts[17] = mLast > 0 && mLast <= 6 ? 46 : 58;
 
@@ -41,7 +50,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ---------------- Helpers bloque “Totales” ---------------- */
+/* ---------- Helpers bloque “Totales” ---------- */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
@@ -55,7 +64,6 @@ function sliceBetween(txt, fromReList, toReList) {
 function splitStuckToken(tok) {
   const s = String(tok);
   if (/^\d{7,10}$/.test(s)) {
-    // corta dejando los últimos 4 dígitos como la segunda parte
     const a = s.slice(0, -4), b = s.slice(-4);
     if (/^\d+$/.test(a) && /^\d+$/.test(b)) return [a, b];
   }
@@ -75,9 +83,8 @@ function pickNumbersNormalized(str) {
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 /**
- * Busca la línea/ventana de “Totales:” y obtiene [Original, Saldo, Vigente]
- * Heurística: escoge el ÚLTIMO trío (a,b,c) de números de 3–6 dígitos donde dos sean iguales.
- * Si los dos iguales son los mayores, el distinto es Original; si los iguales son los menores, invertimos.
+ * Busca la ventana de “Totales:” y obtiene Original/Saldo/Vigente (miles de pesos).
+ * Heurística: toma el ÚLTIMO trío (a,b,c) donde dos sean iguales.
  */
 function parseResumenActivosRobusto(text) {
   const fromReList = [
@@ -105,14 +112,13 @@ function parseResumenActivosRobusto(text) {
   const window = base.slice(Math.max(0, pos), pos + 800);
 
   const nums = pickNumbersNormalized(window)
-    .filter(n => n >= 1 && n <= 999999); // descartamos contadores 0 y basura
+    .filter(n => n >= 1 && n <= 999999); // miles de pesos
 
-  // Busca el último trío donde dos sean iguales (Saldo = Vigente suele cumplirse)
   let triple = null;
   for (let i = 0; i <= nums.length - 3; i++) {
     const a = nums[i], b = nums[i+1], c = nums[i+2];
-    const threeToSix = (x) => String(x).length >= 3 && String(x).length <= 6;
-    if (threeToSix(a) && threeToSix(b) && threeToSix(c)) {
+    const okLen = (x) => String(x).length >= 3 && String(x).length <= 6;
+    if (okLen(a) && okLen(b) && okLen(c)) {
       if (a === b && a !== c) triple = { orig: c, saldo: a, vig: b };
       else if (b === c && b !== a) triple = { orig: a, saldo: b, vig: c };
       else if (a === c && a !== b) triple = { orig: b, saldo: a, vig: c };
@@ -120,15 +126,9 @@ function parseResumenActivosRobusto(text) {
   }
 
   if (!triple) {
-    // Fallback muy conservador: intenta tomar los últimos 3 números razonables
     const tail = nums.slice(-3);
-    if (tail.length === 3) {
-      // si los dos últimos son iguales, asumimos (orig, saldo, vig) = (tail[0], tail[1], tail[2])
-      if (tail[1] === tail[2]) triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
-      else triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
-    } else {
-      return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
-    }
+    if (tail.length === 3) triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
+    else return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
   }
 
   const original = toPesosMiles(triple.orig);
@@ -144,7 +144,7 @@ function parseResumenActivosRobusto(text) {
   };
 }
 
-/* ---------------- Handler ---------------- */
+/* ---------- Handler ---------- */
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -161,7 +161,7 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
-    // Califica
+    // Califica → indicadores
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
     const valores = {};
     for (const it of indicadores) {
@@ -180,13 +180,9 @@ export default async function handler(req, res) {
     const pi = calcularPI(puntajeTotal);
 
     // Totales (Original/Saldo/Vigente/Vencido)
-    const {
-      totalOriginalPesos,
-      totalSaldoActualPesos,
-      totalVigentePesos,
-      totalVencidoPesos,
-    } = parseResumenActivosRobusto(text);
+    const totals = parseResumenActivosRobusto(text);
 
+    // Códigos por ID
     const codigos = {};
     indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
 
@@ -200,10 +196,7 @@ export default async function handler(req, res) {
       puntajeTotal,
       probabilidadIncumplimiento: `${(pi * 100).toFixed(2)}%`,
       summary: {
-        totalOriginalPesos,
-        totalSaldoActualPesos,
-        totalVigentePesos,
-        totalVencidoPesos,
+        ...totals,
         maxCreditPesos: pesosMax,
       },
     });
