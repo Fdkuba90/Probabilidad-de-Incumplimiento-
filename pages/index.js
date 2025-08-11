@@ -45,7 +45,7 @@ export default function Home() {
     17: "MONTHS_SINCE_LAST_OPEN_BANKING",
   };
 
-  // Formateador: para ID 15 mostramos UDIS + etiqueta
+  // Valor: para ID 15 mostramos UDIS (calculadas en backend)
   const fmtValor = (v, idCampo) => {
     if (v === "--" || v === null || v === undefined) return "--";
     if (typeof v === "number") {
@@ -55,7 +55,7 @@ export default function Home() {
     return String(v);
   };
 
-  // Formato pesos MXN
+  // Formato pesos MXN para el panel vertical
   const fmtMXN = (n) =>
     typeof n === "number"
       ? n.toLocaleString("es-MX", { style: "currency", currency: "MXN" })
@@ -63,7 +63,7 @@ export default function Home() {
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
-      {/* Header (logo arriba del título) */}
+      {/* Header (logo sobre el título, centrados) */}
       <header
         style={{
           display: "flex",
@@ -92,26 +92,26 @@ export default function Home() {
 
       {data && (
         <>
-          {/* PANEL VERTICAL (nuevo) */}
+          {/* PANEL VERTICAL: puntaje + totales en pesos */}
           <section style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div><strong>Puntaje total:</strong> {data.puntajeTotal}</div>
               <div><strong>PI:</strong> {data.probabilidadIncumplimiento}</div>
 
               <div>
-                <strong>Monto máximo de crédito:</strong>{" "}
-                {fmtMXN(data?.summary?.maxCreditPesos)}
-              </div>
-              <div>
-                <strong>Total de Créditos (Original):</strong>{" "}
+                <strong>Total de créditos Original (en pesos):</strong>{" "}
                 {fmtMXN(data?.summary?.totalOriginalPesos)}
               </div>
               <div>
-                <strong>Total de Créditos Vigentes:</strong>{" "}
+                <strong>Total de créditos Saldo Actual (en pesos):</strong>{" "}
+                {fmtMXN(data?.summary?.totalSaldoActualPesos)}
+              </div>
+              <div>
+                <strong>Total de créditos Vigentes (en pesos):</strong>{" "}
                 {fmtMXN(data?.summary?.totalVigentePesos)}
               </div>
               <div>
-                <strong>Total de Créditos Vencidos:</strong>{" "}
+                <strong>Total de créditos Vencidos (en pesos):</strong>{" "}
                 {fmtMXN(data?.summary?.totalVencidoPesos)}
               </div>
             </div>
