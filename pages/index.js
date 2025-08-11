@@ -2,105 +2,91 @@ import { useState } from "react";
 
 export default function Home() {
   const [file, setFile] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
-  const [udi, setUdi] = useState("8.1462"); // editable
+  const [udi, setUdi] = useState("8.1462");
+  const [busy, setBusy] = useState(false);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
 
-  const onSubmit = async (e) => {
+  const submit = async (e) => {
     e.preventDefault();
-    setError("");
-    setResult(null);
-    if (!file) return setError("Selecciona un PDF primero.");
+    setErr(""); setData(null);
+    if (!file) { setErr("Selecciona un PDF."); return; }
 
     try {
-      setLoading(true);
+      setBusy(true);
       const fd = new FormData();
       fd.append("file", file);
       fd.append("udi", udi);
 
       const res = await fetch("/api/analyzePdf", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data || "Error al procesar");
-      setResult(data);
-    } catch (err) {
-      setError(err.message || "No se pudo analizar el PDF");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Error en análisis");
+      setData(json);
+    } catch (e) {
+      setErr(e.message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
-  const cell = { borderBottom: "1px solid #eee", padding: 8 };
+  const th = { textAlign: "left", padding: "8px 10px", background: "#f3f4f6", borderBottom: "1px solid #e5e7eb" };
+  const td = { padding: "8px 10px", borderBottom: "1px solid #e5e7eb" };
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "24px" }}>
-      <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+    <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+      <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
         <img src="/finantah-logo.png" alt="FINANTAH" height={32} />
         <h2 style={{ margin: 0 }}>Analizador de Buró – Sección Califica</h2>
       </header>
 
-      <form onSubmit={onSubmit} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+      <form onSubmit={submit} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
         <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-        <label>UDI:&nbsp;
-          <input value={udi} onChange={(e) => setUdi(e.target.value)} style={{ width: 100 }} />
-        </label>
+        <label>UDI:&nbsp;<input value={udi} onChange={(e) => setUdi(e.target.value)} style={{ width: 100 }} /></label>
         <button type="submit">Analizar PDF</button>
       </form>
 
-      {loading && <p>Procesando PDF…</p>}
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      {busy && <p>Procesando PDF…</p>}
+      {err && <p style={{ color: "crimson" }}>{err}</p>}
 
-      {result && (
-        <section>
+      {data && (
+        <>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 12 }}>
-            <div><strong>Puntaje total:</strong> {result.puntajeTotal}</div>
-            <div><strong>PI:</strong> {result.probabilidadIncumplimiento}</div>
-            <div><strong>Monto máx. crédito (UDIS):</strong> {result.valores?._udis ?? "-"}</div>
+            <div><strong>Puntaje total:</strong> {data.puntajeTotal}</div>
+            <div><strong>PI:</strong> {data.probabilidadIncumplimiento}</div>
+            <div><strong>Monto máx. crédito (UDIS):</strong> {data.valores?._udis ?? "-"}</div>
           </div>
 
-          {/* Tabla: valores por ID */}
-          <h4>Valores por ID</h4>
-          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 16 }}>
-            <thead>
-              <tr>
-                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>ID</th>
-                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>Valor</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(result.valores || {})
-                .filter(([k]) => !String(k).startsWith("_"))
-                .sort(([a],[b]) => Number(a) - Number(b))
-                .map(([id, val]) => (
-                  <tr key={id}>
-                    <td style={cell}>{id}</td>
-                    <td style={cell}>{String(val)}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <section>
+              <h4>Valores por ID</h4>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr><th style={th}>ID</th><th style={th}>Valor</th></tr></thead>
+                <tbody>
+                  {Object.entries(data.valores || {})
+                    .filter(([k]) => !String(k).startsWith("_"))
+                    .sort(([a],[b]) => Number(a) - Number(b))
+                    .map(([id, val]) => (
+                      <tr key={id}><td style={td}>{id}</td><td style={td}>{String(val)}</td></tr>
+                    ))}
+                </tbody>
+              </table>
+            </section>
 
-          {/* Tabla: puntaje por ID */}
-          <h4>Puntaje por ID</h4>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>ID</th>
-                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>Puntos</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(result.puntos || {})
-                .sort(([a],[b]) => Number(a) - Number(b))
-                .map(([id, pts]) => (
-                  <tr key={id}>
-                    <td style={cell}>{id}</td>
-                    <td style={cell}>{pts}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </section>
+            <section>
+              <h4>Puntaje por ID</h4>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr><th style={th}>ID</th><th style={th}>Puntos</th></tr></thead>
+                <tbody>
+                  {Object.entries(data.puntos || {})
+                    .sort(([a],[b]) => Number(a) - Number(b))
+                    .map(([id, val]) => (
+                      <tr key={id}><td style={td}>{id}</td><td style={td}>{val}</td></tr>
+                    ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
+        </>
       )}
     </main>
   );
