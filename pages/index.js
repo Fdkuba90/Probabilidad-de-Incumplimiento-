@@ -34,10 +34,17 @@ export default function Home() {
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
-      <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-        <img src="/finantah-logo.png" alt="FINANTAH" height={32} />
-        <h2 style={{ margin: 0 }}>Analizador de Buró – Sección Califica</h2>
-      </header>
+     <header style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+  <img
+    src="/finantah-logo.png"
+    alt="FINANTAH"
+    height={32}
+    style={{ marginTop: "-4px" }} // Sube el logo un poquito
+  />
+  <h2 style={{ margin: 0, alignSelf: "center" }}>
+    Analizador de Buró – Sección Califica
+  </h2>
+</header>
 
       <form onSubmit={submit} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
         <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
