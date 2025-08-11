@@ -54,48 +54,91 @@ function calcularPI(score) {
 }
 
 // -----------------------------
-// Helpers para “Resumen Créditos Activos”
+// Helpers robustos para “Resumen Créditos Activos”
 // -----------------------------
-function sliceBetween(txt, fromRe, toRe) {
-  const fromIdx = txt.search(fromRe);
+function sliceBetween(txt, fromReList, toReList) {
+  // prueba varios “from” hasta encontrar uno
+  let fromIdx = -1;
+  for (const re of fromReList) {
+    const i = txt.search(re);
+    if (i !== -1) { fromIdx = i; break; }
+  }
   if (fromIdx === -1) return "";
+
   const rest = txt.slice(fromIdx);
-  const toMatch = rest.search(toRe);
-  return toMatch === -1 ? rest : rest.slice(0, toMatch);
+
+  // corta en el primer “to” que aparezca
+  let endIdx = -1;
+  for (const re of toReList) {
+    const j = rest.search(re);
+    if (j !== -1) { endIdx = j; break; }
+  }
+  return endIdx === -1 ? rest : rest.slice(0, endIdx);
+}
+
+// extrae números (con miles) de una ventana
+function pickNumbers(str) {
+  return (str.match(/[\d]+(?:[.,][\d]+)*/g) || []);
+}
+
+function toPesosMiles(v) {
+  if (v == null) return null;
+  const n = parseFloat(String(v).replace(/,/g, ""));
+  if (Number.isNaN(n)) return null;
+  return Math.round(n * 1000); // miles de pesos → pesos
 }
 
 /**
  * Lee la fila "Totales:" del bloque "Resumen Créditos Activos".
- * En el PDF, las cantidades están en MILES de pesos.
- *
- * Orden de columnas (relevantes):
- * ... Original, Saldo Actual, Vigente, 1-29, 30-59, 60-89, 90-119, 120-179, 180+
- * Usamos exactamente Original (idx 4), Saldo Actual (idx 5), Vigente (idx 6).
+ * Si no la encuentra dentro del bloque, hace un fallback global buscando "Totales:" en todo el texto.
+ * Mapea posiciones estándar:
+ *   idx 4 → Original
+ *   idx 5 → Saldo Actual
+ *   idx 6 → Vigente
  */
-function parseResumenActivos(text) {
-  const bloque = sliceBetween(
-    text,
-    /Resumen\s+Créditos\s+Activos/i,
-    /(Créditos\s+Liquidados|Resumen\s+Créditos\s+Liquidados|Historia|INFORMACI[ÓO]N\s+COMERCIAL|DECLARATIVAS)/i
-  );
+function parseResumenActivosRobusto(text) {
+  const fromReList = [
+    /Resumen\s*(de)?\s*Cr[eé]ditos?\s+Activos?/i,
+    /Resumen\s+Cr[eé]ditos?\s+Activos?/i,
+    /Cr[eé]ditos?\s+Activos?.*Resumen/i
+  ];
+  const toReList = [
+    /(Cr[eé]ditos?\s+Liquidados?)/i,
+    /(Resumen\s+Cr[eé]ditos?\s+Liquidados?)/i,
+    /(Historia)/i,
+    /(INFORMACI[ÓO]N\s+COMERCIAL)/i,
+    /(DECLARATIVAS)/i
+  ];
 
-  const lineaTotales = (bloque.match(/Totales:.*$/gmi) || [])[0] || "";
-  if (!lineaTotales) {
-    return {
-      totalOriginalPesos: null,
-      totalSaldoActualPesos: null,
-      totalVigentePesos: null,
-      totalVencidoPesos: null,
-    };
+  let bloque = sliceBetween(text, fromReList, toReList);
+  let windowStr = "";
+  let idx = bloque.search(/Totales\s*:/i);
+
+  if (idx !== -1) {
+    windowStr = bloque.slice(idx, idx + 800);
+  } else {
+    // Fallback global: busca un "Totales:" cerca de “Original / Saldo Actual / Vigente”
+    const globalIdx = text.search(/Totales\s*:/i);
+    if (globalIdx !== -1) {
+      windowStr = text.slice(globalIdx, globalIdx + 800);
+    } else {
+      // último recurso: no se encontró “Totales:”
+      return {
+        totalOriginalPesos: null,
+        totalSaldoActualPesos: null,
+        totalVigentePesos: null,
+        totalVencidoPesos: null
+      };
+    }
   }
 
-  const nums = lineaTotales.match(/[\d,.]+/g) || [];
-  const toPesos = (v) => Math.round(parseFloat(String(v).replace(/,/g, "")) * 1000);
+  const nums = pickNumbers(windowStr);
+  // posiciones típicas observadas en los reportes del Buró:
+  const orig = nums[4], saldo = nums[5], vig = nums[6];
 
-  // Según el layout observado:
-  const totalOriginalPesos    = nums.length >= 5 ? toPesos(nums[4]) : null;
-  const totalSaldoActualPesos = nums.length >= 6 ? toPesos(nums[5]) : null;
-  const totalVigentePesos     = nums.length >= 7 ? toPesos(nums[6]) : null;
+  const totalOriginalPesos    = toPesosMiles(orig);
+  const totalSaldoActualPesos = toPesosMiles(saldo);
+  const totalVigentePesos     = toPesosMiles(vig);
 
   let totalVencidoPesos = null;
   if (typeof totalSaldoActualPesos === "number" && typeof totalVigentePesos === "number") {
@@ -145,13 +188,13 @@ export default async function handler(req, res) {
     const { pts, puntajeTotal } = puntuar(valores);
     const pi = calcularPI(puntajeTotal);
 
-    // Resumen Créditos Activos (Original, Saldo Actual, Vigente, Vencido)
+    // Resumen Créditos Activos (robusto)
     const {
       totalOriginalPesos,
       totalSaldoActualPesos,
       totalVigentePesos,
       totalVencidoPesos,
-    } = parseResumenActivos(text);
+    } = parseResumenActivosRobusto(text);
 
     // Mapa de códigos por ID (útil para el front)
     const codigos = {};
