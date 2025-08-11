@@ -5,100 +5,101 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [udi, setUdi] = useState("8.1462"); // editable
 
   const onSubmit = async (e) => {
     e.preventDefault();
     setError("");
     setResult(null);
+    if (!file) return setError("Selecciona un PDF primero.");
 
-    if (!file) {
-      setError("Selecciona un PDF primero.");
-      return;
-    }
-
-    const form = new FormData();
-    form.append("file", file);
-
-    setLoading(true);
     try {
-      const res = await fetch("/api/analyzePdf", {
-        method: "POST",
-        body: form
-      });
+      setLoading(true);
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("udi", udi);
 
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || "Error del servidor");
-      }
-
+      const res = await fetch("/api/analyzePdf", { method: "POST", body: fd });
       const data = await res.json();
+      if (!res.ok) throw new Error(data || "Error al procesar");
       setResult(data);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || "No se pudo analizar el PDF");
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <main style={{ maxWidth: 720, margin: "32px auto", fontFamily: "Inter, system-ui, Arial" }}>
-      <img src="/finantah-logo.png" alt="FINANTAH" style={{ maxWidth: "200px", marginBottom: "20px" }} />
-      <h1>Analizador de Buró – Sección Califica</h1>
-      <p>Sube el PDF del Buró Empresarial. Extraeré la sección <b>Califica</b> y te mostraré el texto y una tabla preliminar.</p>
+  const cell = { borderBottom: "1px solid #eee", padding: 8 };
 
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 12, marginTop: 16 }}>
-        <input
-          type="file"
-          accept="application/pdf"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        />
-        <button type="submit" disabled={loading}>
-          {loading ? "Procesando…" : "Analizar PDF"}
-        </button>
+  return (
+    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "24px" }}>
+      <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+        <img src="/finantah-logo.png" alt="FINANTAH" height={32} />
+        <h2 style={{ margin: 0 }}>Analizador de Buró – Sección Califica</h2>
+      </header>
+
+      <form onSubmit={onSubmit} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
+        <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        <label>UDI:&nbsp;
+          <input value={udi} onChange={(e) => setUdi(e.target.value)} style={{ width: 100 }} />
+        </label>
+        <button type="submit">Analizar PDF</button>
       </form>
 
-      {error && (
-        <div style={{ marginTop: 16, color: "#b00020" }}>
-          <b>Error:</b> {error}
-        </div>
-      )}
+      {loading && <p>Procesando PDF…</p>}
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
 
       {result && (
-        <section style={{ marginTop: 24 }}>
-          <h2>Resultado</h2>
-          <div>
-            <p><b>Páginas:</b> {result?.meta?.numpages ?? ""}</p>
-            <p><b>Producer:</b> {result?.meta?.info?.Producer ?? ""}</p>
+        <section>
+          <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 12 }}>
+            <div><strong>Puntaje total:</strong> {result.puntajeTotal}</div>
+            <div><strong>PI:</strong> {result.probabilidadIncumplimiento}</div>
+            <div><strong>Monto máx. crédito (UDIS):</strong> {result.valores?._udis ?? "-"}</div>
           </div>
 
-          <h3>Texto crudo de “Califica”</h3>
-          <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 12, borderRadius: 8 }}>
-{result?.calificaRaw || "No se localizó la sección Califica."}
-          </pre>
-
-          {Array.isArray(result?.indicadores) && result.indicadores.length > 0 && (
-            <>
-              <h3>Indicadores detectados (preliminar)</h3>
-              <table style={{ borderCollapse: "collapse", width: "100%" }}>
-                <thead>
-                  <tr>
-                    <th style={{ borderBottom: "1px solid #ddd", textAlign: "left", padding: 8 }}>ID</th>
-                    <th style={{ borderBottom: "1px solid #ddd", textAlign: "left", padding: 8 }}>Indicador</th>
-                    <th style={{ borderBottom: "1px solid #ddd", textAlign: "left", padding: 8 }}>Valor</th>
+          {/* Tabla: valores por ID */}
+          <h4>Valores por ID</h4>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 16 }}>
+            <thead>
+              <tr>
+                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>ID</th>
+                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>Valor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(result.valores || {})
+                .filter(([k]) => !String(k).startsWith("_"))
+                .sort(([a],[b]) => Number(a) - Number(b))
+                .map(([id, val]) => (
+                  <tr key={id}>
+                    <td style={cell}>{id}</td>
+                    <td style={cell}>{String(val)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {result.indicadores.map((row, idx) => (
-                    <tr key={idx}>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 8 }}>{row.id ?? ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 8 }}>{row.nombre ?? ""}</td>
-                      <td style={{ borderBottom: "1px solid #eee", padding: 8 }}>{row.valor ?? ""}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
+                ))}
+            </tbody>
+          </table>
+
+          {/* Tabla: puntaje por ID */}
+          <h4>Puntaje por ID</h4>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>ID</th>
+                <th style={{ ...cell, background: "#f5f5f5", textAlign: "left" }}>Puntos</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(result.puntos || {})
+                .sort(([a],[b]) => Number(a) - Number(b))
+                .map(([id, pts]) => (
+                  <tr key={id}>
+                    <td style={cell}>{id}</td>
+                    <td style={cell}>{pts}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
         </section>
       )}
     </main>
