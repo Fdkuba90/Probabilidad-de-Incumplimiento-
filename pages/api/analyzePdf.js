@@ -7,7 +7,7 @@ export const config = { api: { bodyParser: false } };
 
 // Parámetros
 const PUNTOS_BASE = 285;
-const DEFAULT_UDI = 8.1462; // puedes sobreescribirlo desde el front (campo "udi")
+const DEFAULT_UDI = 8.1462; // se sobreescribe desde el front
 
 // -----------------------------
 // Helpers de puntuación y PI
@@ -18,11 +18,11 @@ function puntuar(val) {
   // 1 – # créditos bancarios 12m
   pts[1] = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
 
-  // 6 – % pagos en tiempo no bancarias
+  // 6 – % pagos en tiempo NO bancarias
   if (val[6] === "--" || val[6] == null) pts[6] = 52;
   else pts[6] = val[6] >= 0.93 ? 71 : val[6] >= 0.81 ? 54 : 17;
 
-  // 9 – % mora bancaria ≥60 días (0 ó >0)
+  // 9 – % mora bancaria ≥60 días
   pts[9] = Number(val[9]) === 0 ? 54 : -19;
 
   // 11 – % mora comercial ≥60 días
@@ -32,7 +32,7 @@ function puntuar(val) {
   // 14 – Quitas/Castigos/Reestructuras (0/1)
   pts[14] = Number(val[14]) === 0 ? 55 : -29;
 
-  // 15 – Monto máx. crédito en UDIS
+  // 15 – Monto máx. crédito en UDIS (el Buró da pesos → convertimos a UDIS)
   const udis = Number(val._udis) || 0;
   pts[15] = udis >= 1_000_000 ? 112 : 52;
 
@@ -42,7 +42,7 @@ function puntuar(val) {
 
   // 17 – Meses desde el último crédito
   const mLast = Number(val[17]) || 0;
-  pts[17] = mLast > 0 && mLast <= 6 ? 46 : 58; // (0,6] → 46; ≥6 → 58; "--" → 58
+  pts[17] = mLast > 0 && mLast <= 6 ? 46 : 58; // (0,6] → 46; ≥6 o "--" → 58
 
   const puntajeTotal = PUNTOS_BASE + Object.values(pts).reduce((a, b) => a + b, 0);
   return { pts, puntajeTotal };
@@ -64,30 +64,45 @@ function sliceBetween(txt, fromRe, toRe) {
   return toMatch === -1 ? rest : rest.slice(0, toMatch);
 }
 
+/**
+ * Lee la fila "Totales:" del bloque "Resumen Créditos Activos".
+ * En el PDF, las cantidades están en MILES de pesos.
+ *
+ * Orden de columnas (relevantes):
+ * ... Original, Saldo Actual, Vigente, 1-29, 30-59, 60-89, 90-119, 120-179, 180+
+ * Usamos exactamente Original (idx 4), Saldo Actual (idx 5), Vigente (idx 6).
+ */
 function parseResumenActivos(text) {
-  // recorta desde "Resumen Créditos Activos" hasta el siguiente bloque
   const bloque = sliceBetween(
     text,
     /Resumen\s+Créditos\s+Activos/i,
     /(Créditos\s+Liquidados|Resumen\s+Créditos\s+Liquidados|Historia|INFORMACI[ÓO]N\s+COMERCIAL|DECLARATIVAS)/i
   );
 
-  // línea con "Totales:"
-  const matchLine = (bloque.match(/.*Totales:.*$/gmi) || [])[0] || "";
-  if (!matchLine) return { totalOriginalPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
+  const lineaTotales = (bloque.match(/Totales:.*$/gmi) || [])[0] || "";
+  if (!lineaTotales) {
+    return {
+      totalOriginalPesos: null,
+      totalSaldoActualPesos: null,
+      totalVigentePesos: null,
+      totalVencidoPesos: null,
+    };
+  }
 
-  // Montos están en miles de pesos
+  const nums = lineaTotales.match(/[\d,.]+/g) || [];
   const toPesos = (v) => Math.round(parseFloat(String(v).replace(/,/g, "")) * 1000);
-  const nums = matchLine.match(/[\d,.]+/g) || [];
 
-  const totalOriginalPesos = nums[0] ? toPesos(nums[0]) : null;
-  const totalVigentePesos  = nums[1] ? toPesos(nums[1]) : null;
+  // Según el layout observado:
+  const totalOriginalPesos    = nums.length >= 5 ? toPesos(nums[4]) : null;
+  const totalSaldoActualPesos = nums.length >= 6 ? toPesos(nums[5]) : null;
+  const totalVigentePesos     = nums.length >= 7 ? toPesos(nums[6]) : null;
 
-  // Las 6 columnas siguientes suelen ser los vencidos (1-29, 30-59, 60-89, 90-119, 120-179, 180+)
-  let totalVencidoPesos = 0;
-  for (let i = 2; i < Math.min(nums.length, 8); i++) totalVencidoPesos += toPesos(nums[i]);
+  let totalVencidoPesos = null;
+  if (typeof totalSaldoActualPesos === "number" && typeof totalVigentePesos === "number") {
+    totalVencidoPesos = Math.max(0, totalSaldoActualPesos - totalVigentePesos);
+  }
 
-  return { totalOriginalPesos, totalVigentePesos, totalVencidoPesos };
+  return { totalOriginalPesos, totalSaldoActualPesos, totalVigentePesos, totalVencidoPesos };
 }
 
 // -----------------------------
@@ -110,7 +125,7 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
-    // Extraer Califica
+    // Extraer Califica (IDs/valores del bloque "Califica")
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
 
     // Normalizar a diccionario { id: valor }
@@ -123,21 +138,20 @@ export default async function handler(req, res) {
     // ID 15: pesos → UDIS
     const udi = Number(fields?.udi) || DEFAULT_UDI;
     const pesosMax = Number(valores[15] || 0); // en pesos (del Buró)
-    const udisMax = pesosMax > 0 ? pesosMax / udi : 0;
-    valores._udis = Math.round(udisMax);
+    const udisMax  = pesosMax > 0 ? pesosMax / udi : 0;
+    valores._udis  = Math.round(udisMax);
 
     // Puntos y PI
     const { pts, puntajeTotal } = puntuar(valores);
     const pi = calcularPI(puntajeTotal);
 
-    // Resumen de totales (en pesos)
-    const resumen = parseResumenActivos(text);
-    const summary = {
-      maxCreditPesos: pesosMax,
-      totalOriginalPesos: resumen.totalOriginalPesos,
-      totalVigentePesos: resumen.totalVigentePesos,
-      totalVencidoPesos: resumen.totalVencidoPesos,
-    };
+    // Resumen Créditos Activos (Original, Saldo Actual, Vigente, Vencido)
+    const {
+      totalOriginalPesos,
+      totalSaldoActualPesos,
+      totalVigentePesos,
+      totalVencidoPesos,
+    } = parseResumenActivos(text);
 
     // Mapa de códigos por ID (útil para el front)
     const codigos = {};
@@ -148,11 +162,17 @@ export default async function handler(req, res) {
       calificaRaw,
       indicadores,
       codigos,
-      valores,                 // incluye _udis (UDIS de ID 15)
+      valores,                       // incluye _udis (UDIS de ID 15)
       puntos: pts,
       puntajeTotal,
       probabilidadIncumplimiento: `${(pi * 100).toFixed(2)}%`,
-      summary,                 // montos en pesos
+      summary: {
+        totalOriginalPesos,          // "Original" (miles → pesos)
+        totalSaldoActualPesos,       // "Saldo Actual"
+        totalVigentePesos,           // "Vigente"
+        totalVencidoPesos,           // SaldoActual - Vigente
+        maxCreditPesos: pesosMax,    // ID 15 en pesos (por si lo quieres usar)
+      },
     });
   } catch (e) {
     console.error("analyzePdf error:", e);
