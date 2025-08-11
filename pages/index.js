@@ -70,9 +70,11 @@ export default function Home() {
           src="/finantah-logo.png"
           alt="FINANTAH"
           height={32}
-          style={{ marginTop: "-4px" }} // sube un poco el logo
+          style={{ marginTop: "-6px" }} // sube el logo un poco más
         />
-        <h2 style={{ margin: 0, alignSelf: "center" }}>Analizador de Buró – Sección Califica</h2>
+        <h2 style={{ margin: 0, paddingTop: "4px" }}>
+          Analizador de Buró – Sección Califica
+        </h2>
       </header>
 
       {/* Formulario */}
