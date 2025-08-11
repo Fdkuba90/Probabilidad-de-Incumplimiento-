@@ -8,10 +8,9 @@ export const config = { api: { bodyParser: false } };
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
-// ---------------- puntuación & PI ----------------
+/* ---------------- Puntuación & PI ---------------- */
 function puntuar(val) {
   const pts = {};
-
   pts[1]  = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
 
   if (val[6] === "--" || val[6] == null) pts[6] = 52;
@@ -42,7 +41,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-// ---------------- helpers bloque “Totales” ----------------
+/* ---------------- Helpers bloque “Totales” ---------------- */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
@@ -51,20 +50,34 @@ function sliceBetween(txt, fromReList, toReList) {
   for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
   return rest;
 }
-const pickNumbers = (s) => (s.match(/[\d]+(?:[.,][\d]+)*/g) || []);
-const toPesosMiles = (v) => {
-  if (v == null) return null;
-  // Quitamos comas y SI VIENE CON PUNTO COMO SEPARADOR DE MILES, también lo quitamos.
-  const clean = String(v).replace(/[.,](?=\d{3}\b)/g, "").replace(/,/g, "");
-  const n = parseFloat(clean);
-  if (Number.isNaN(n)) return null;
-  return Math.round(n * 1000); // miles de pesos → pesos
-};
+
+// Divide tokens pegados tipo "28892442" → ["2889","2442"]
+function splitStuckToken(tok) {
+  const s = String(tok);
+  if (/^\d{7,10}$/.test(s)) {
+    // corta dejando los últimos 4 dígitos como la segunda parte
+    const a = s.slice(0, -4), b = s.slice(-4);
+    if (/^\d+$/.test(a) && /^\d+$/.test(b)) return [a, b];
+  }
+  return [s];
+}
+
+function pickNumbersNormalized(str) {
+  const raw = (str.match(/\d{1,12}/g) || []);
+  const flat = [];
+  for (const t of raw) flat.push(...splitStuckToken(t));
+  return flat
+    .map(x => x.replace(/^0+/, "") || "0")
+    .map(x => parseInt(x, 10))
+    .filter(n => Number.isFinite(n));
+}
+
+const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 /**
- * Regresa Original, Saldo Actual y Vigente desde “Totales:”
- * 1) Intenta un REGEX estructurado en la línea/ventana local
- * 2) Fallback: mapeo por índices (4,5,6) en ventana
+ * Busca la línea/ventana de “Totales:” y obtiene [Original, Saldo, Vigente]
+ * Heurística: escoge el ÚLTIMO trío (a,b,c) de números de 3–6 dígitos donde dos sean iguales.
+ * Si los dos iguales son los mayores, el distinto es Original; si los iguales son los menores, invertimos.
  */
 function parseResumenActivosRobusto(text) {
   const fromReList = [
@@ -80,62 +93,58 @@ function parseResumenActivosRobusto(text) {
     /(DECLARATIVAS)/i
   ];
 
-  let bloque = sliceBetween(text, fromReList, toReList);
+  const bloque = sliceBetween(text, fromReList, toReList);
+  const lineMatch = (bloque.match(/Totales[^\r\n]*/i) || [])[0]
+                 || (text.match(/Totales[^\r\n]*/i) || [])[0];
+  if (!lineMatch) {
+    return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
+  }
 
-  // Toma la línea con “Totales:” (o una ventana alrededor)
-  let linea = (bloque.match(/Totales[^\r\n]*/i) || [])[0];
-  let ventana = "";
+  const base = bloque && bloque.includes(lineMatch) ? bloque : text;
+  const pos = base.indexOf(lineMatch);
+  const window = base.slice(Math.max(0, pos), pos + 800);
 
-  if (linea) {
-    // amplía un poco por si los números brincan de línea
-    const pos = bloque.indexOf(linea);
-    ventana = bloque.slice(pos, pos + 600);
-  } else {
-    // fallback global
-    const m = text.match(/Totales[^\r\n]*/i);
-    if (m) {
-      const pos = text.indexOf(m[0]);
-      ventana = text.slice(pos, pos + 600);
-      linea = m[0];
+  const nums = pickNumbersNormalized(window)
+    .filter(n => n >= 1 && n <= 999999); // descartamos contadores 0 y basura
+
+  // Busca el último trío donde dos sean iguales (Saldo = Vigente suele cumplirse)
+  let triple = null;
+  for (let i = 0; i <= nums.length - 3; i++) {
+    const a = nums[i], b = nums[i+1], c = nums[i+2];
+    const threeToSix = (x) => String(x).length >= 3 && String(x).length <= 6;
+    if (threeToSix(a) && threeToSix(b) && threeToSix(c)) {
+      if (a === b && a !== c) triple = { orig: c, saldo: a, vig: b };
+      else if (b === c && b !== a) triple = { orig: a, saldo: b, vig: c };
+      else if (a === c && a !== b) triple = { orig: b, saldo: a, vig: c };
+    }
+  }
+
+  if (!triple) {
+    // Fallback muy conservador: intenta tomar los últimos 3 números razonables
+    const tail = nums.slice(-3);
+    if (tail.length === 3) {
+      // si los dos últimos son iguales, asumimos (orig, saldo, vig) = (tail[0], tail[1], tail[2])
+      if (tail[1] === tail[2]) triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
+      else triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
     } else {
       return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
     }
   }
 
-  // 1) REGEX estructurado: Totales: <4 enteros> <Original> <Saldo> <Vigente>
-  //    (admite múltiples espacios / saltos / separadores)
-  const norm = (ventana || linea).replace(/\s+/g, " ");
-  const rx = /Totales\s*:\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/i;
-  let m = rx.exec(norm);
-
-  let original, saldo, vigente;
-
-  if (m) {
-    original = toPesosMiles(m[5]);
-    saldo    = toPesosMiles(m[6]);
-    vigente  = toPesosMiles(m[7]);
-  } else {
-    // 2) Fallback por índices
-    const nums = pickNumbers(ventana || linea);
-    original = toPesosMiles(nums[4]);
-    saldo    = toPesosMiles(nums[5]);
-    vigente  = toPesosMiles(nums[6]);
-  }
-
-  let vencido = null;
-  if (typeof saldo === "number" && typeof vigente === "number") {
-    vencido = Math.max(0, saldo - vigente);
-  }
+  const original = toPesosMiles(triple.orig);
+  const saldo    = toPesosMiles(triple.saldo);
+  const vigente  = toPesosMiles(triple.vig);
+  const vencido  = (typeof saldo === "number" && typeof vigente === "number") ? Math.max(0, saldo - vigente) : null;
 
   return {
-    totalOriginalPesos: original ?? null,
-    totalSaldoActualPesos: saldo ?? null,
-    totalVigentePesos: vigente ?? null,
-    totalVencidoPesos: vencido
+    totalOriginalPesos: original,
+    totalSaldoActualPesos: saldo,
+    totalVigentePesos: vigente,
+    totalVencidoPesos: vencido,
   };
 }
 
-// ---------------- handler ----------------
+/* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -152,8 +161,8 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
+    // Califica
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
-
     const valores = {};
     for (const it of indicadores) {
       const raw = String(it.valor).trim();
@@ -166,9 +175,11 @@ export default async function handler(req, res) {
     const udisMax  = pesosMax > 0 ? pesosMax / udi : 0;
     valores._udis  = Math.round(udisMax);
 
+    // Puntaje y PI
     const { pts, puntajeTotal } = puntuar(valores);
     const pi = calcularPI(puntajeTotal);
 
+    // Totales (Original/Saldo/Vigente/Vencido)
     const {
       totalOriginalPesos,
       totalSaldoActualPesos,
