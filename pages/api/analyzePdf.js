@@ -8,36 +8,28 @@ export const config = { api: { bodyParser: false } };
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
-/* ---------- Puntuación & PI ---------- */
+/* ---------------- Puntuación & PI ---------------- */
 function puntuar(val) {
   const pts = {};
-
-  // ID 1
+  // 1
   pts[1] = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
-
-  // ID 6
+  // 6
   if (val[6] === "--" || val[6] == null) pts[6] = 52;
   else pts[6] = val[6] >= 0.93 ? 71 : val[6] >= 0.81 ? 54 : 17;
-
-  // ID 9
+  // 9
   pts[9] = Number(val[9]) === 0 ? 54 : -19;
-
-  // ID 11
+  // 11
   if (val[11] === "--" || val[11] == null) pts[11] = 55;
   else pts[11] = Number(val[11]) === 0 ? 57 : 30;
-
-  // ID 14
+  // 14
   pts[14] = Number(val[14]) === 0 ? 55 : -29;
-
-  // ID 15 (ya viene convertido a UDIS en valores._udis)
+  // 15 (usa _udis calculado)
   const udis = Number(val._udis) || 0;
   pts[15] = udis >= 1_000_000 ? 112 : 52;
-
-  // ID 16
+  // 16
   const m = Number(val[16]) || 0;
   pts[16] = m < 24 ? 41 : m < 36 ? 51 : m < 48 ? 60 : m < 98 ? 60 : m < 120 ? 61 : 67;
-
-  // ID 17
+  // 17
   const mLast = Number(val[17]) || 0;
   pts[17] = mLast > 0 && mLast <= 6 ? 46 : 58;
 
@@ -50,7 +42,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ---------- Helpers bloque “Totales” ---------- */
+/* ---------------- Helpers bloque “Totales” ---------------- */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
@@ -83,8 +75,8 @@ function pickNumbersNormalized(str) {
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 /**
- * Busca la ventana de “Totales:” y obtiene Original/Saldo/Vigente (miles de pesos).
- * Heurística: toma el ÚLTIMO trío (a,b,c) donde dos sean iguales.
+ * Busca la línea/ventana de “Totales:” y obtiene [Original, Saldo, Vigente]
+ * Heurística: último trío (a,b,c) de 3–6 dígitos donde dos sean iguales.
  */
 function parseResumenActivosRobusto(text) {
   const fromReList = [
@@ -112,8 +104,9 @@ function parseResumenActivosRobusto(text) {
   const window = base.slice(Math.max(0, pos), pos + 800);
 
   const nums = pickNumbersNormalized(window)
-    .filter(n => n >= 1 && n <= 999999); // miles de pesos
+    .filter(n => n >= 1 && n <= 999999);
 
+  // último trío con dos iguales
   let triple = null;
   for (let i = 0; i <= nums.length - 3; i++) {
     const a = nums[i], b = nums[i+1], c = nums[i+2];
@@ -127,8 +120,12 @@ function parseResumenActivosRobusto(text) {
 
   if (!triple) {
     const tail = nums.slice(-3);
-    if (tail.length === 3) triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
-    else return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
+    if (tail.length === 3) {
+      if (tail[1] === tail[2]) triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
+      else triple = { orig: tail[0], saldo: tail[1], vig: tail[2] };
+    } else {
+      return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
+    }
   }
 
   const original = toPesosMiles(triple.orig);
@@ -144,7 +141,34 @@ function parseResumenActivosRobusto(text) {
   };
 }
 
-/* ---------- Handler ---------- */
+/* ---------------- Extraer Nombre/Razón Social ---------------- */
+function extractEmpresa(text) {
+  // Caso 1: “Nombre/Razón Social: <nombre>”
+  let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
+  if (m) {
+    const cand = m[1].trim();
+    if (cand) return cand;
+  }
+  // Caso 2: “<nombre>Nombre/Razón Social:” (nombre pegado antes)
+  m = text.match(/([^\n\r]+?)\s*Nombre\/Raz[oó]n Social:/i);
+  if (m) {
+    const cand = m[1].trim();
+    if (cand) return cand;
+  }
+  // Caso 3: línea previa a “Nombre/Razón Social:” si viene en salto
+  const idx = text.search(/Nombre\/Raz[oó]n Social:/i);
+  if (idx > 0) {
+    const head = text.slice(Math.max(0, idx - 120), idx);
+    const lines = head.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (lines.length) {
+      const last = lines[lines.length - 1];
+      if (last && !/^(RFC|CURP|Direcci[oó]n|Datos Generales)/i.test(last)) return last;
+    }
+  }
+  return null;
+}
+
+/* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -161,7 +185,7 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
-    // Califica → indicadores
+    // Califica
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
     const valores = {};
     for (const it of indicadores) {
@@ -180,14 +204,23 @@ export default async function handler(req, res) {
     const pi = calcularPI(puntajeTotal);
 
     // Totales (Original/Saldo/Vigente/Vencido)
-    const totals = parseResumenActivosRobusto(text);
+    const {
+      totalOriginalPesos,
+      totalSaldoActualPesos,
+      totalVigentePesos,
+      totalVencidoPesos,
+    } = parseResumenActivosRobusto(text);
 
     // Códigos por ID
     const codigos = {};
     indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
 
+    // Nombre de empresa
+    const nombreEmpresa = extractEmpresa(text);
+
     return res.status(200).json({
       meta: { pages: parsed?.numpages || null },
+      empresa: nombreEmpresa,              // <-- nuevo
       calificaRaw,
       indicadores,
       codigos,
@@ -196,7 +229,10 @@ export default async function handler(req, res) {
       puntajeTotal,
       probabilidadIncumplimiento: `${(pi * 100).toFixed(2)}%`,
       summary: {
-        ...totals,
+        totalOriginalPesos,
+        totalSaldoActualPesos,
+        totalVigentePesos,
+        totalVencidoPesos,
         maxCreditPesos: pesosMax,
       },
     });
