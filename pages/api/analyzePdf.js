@@ -5,7 +5,6 @@ import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
 import { parseHistoriaFromText } from "../../lib/parseHistoria.js";
 
-// ❗ Vercel (Node runtimes) — sin bodyParser porque viene multipart
 export const config = {
   api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
 };
@@ -16,25 +15,17 @@ const DEFAULT_UDI = 8.1462;
 /* ======================= PUNTUACIÓN & PI ======================= */
 function puntuar(val) {
   const pts = {};
-  // 1
   pts[1] = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16;
-  // 6
   if (val[6] === "--" || val[6] == null) pts[6] = 52;
   else pts[6] = val[6] >= 0.93 ? 71 : val[6] >= 0.81 ? 54 : 17;
-  // 9
   pts[9] = Number(val[9]) === 0 ? 54 : -19;
-  // 11
   if (val[11] === "--" || val[11] == null) pts[11] = 55;
   else pts[11] = Number(val[11]) === 0 ? 57 : 30;
-  // 14
   pts[14] = Number(val[14]) === 0 ? 55 : -29;
-  // 15 (usa _udis calculado)
   const udis = Number(val._udis) || 0;
   pts[15] = udis >= 1_000_000 ? 112 : 52;
-  // 16
   const m = Number(val[16]) || 0;
   pts[16] = m < 24 ? 41 : m < 36 ? 51 : m < 48 ? 60 : m < 98 ? 60 : m < 120 ? 61 : 67;
-  // 17
   const mLast = Number(val[17]) || 0;
   pts[17] = mLast > 0 && mLast <= 6 ? 46 : 58;
 
@@ -167,94 +158,65 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA VERTICAL (especial miles) ======================= */
-function parseHistoriaVerticalMiles(fullText) {
-  // 1) Tomamos sólo el bloque "Historia"
-  const historia = sliceBetween(
-    fullText,
+/* ======================= HISTORIA VERTICAL: busca número tras cada mes (×1000) ======================= */
+function parseHistoriaVerticalMiles(text) {
+  const bloque = sliceBetween(
+    text,
     [/^\s*Historia\b/im],
     [/^\s*INFORMACI[ÓO]N\s+COMERCIAL\b/im, /^\s*Califica\b/im, /^\s*DECLARATIVAS\b/im, /^\s*INFORMACI[ÓO]N\s+DE\s+PLD\b/im, /^\s*FIN DEL REPORTE\b/im]
   );
-  if (!historia) return [];
+  if (!bloque) return [];
 
-  // 2) Coleccionamos meses en orden de aparición
-  const MES = /\b(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+(\d{4})\b/gi;
-  const meses = [];
-  const seen = new Set();
-  let m;
-  while ((m = MES.exec(historia)) !== null) {
-    const mes = `${m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()} ${m[2]}`;
-    if (!seen.has(mes)) { seen.add(mes); meses.push(mes); }
-  }
-  if (!meses.length) return [];
+  const lines = bloque.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
 
-  // 3) Helper para normalizar números (miles de pesos → MXN)
   const toNum = (s) => {
     if (!s) return 0;
     const canon = String(s).replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "").replace(/,/g, ".");
     const v = Number(canon);
-    return Number.isFinite(v) ? Math.round(v * 1000) : 0; // ×1000 porque el reporte está en miles
+    return Number.isFinite(v) ? Math.round(v * 1000) : 0; // miles → MXN
   };
 
-  // 4) Capturamos "Vigente" por cada mes: "<Mes Año> ... <número> ... Vigente"
-  const vigente = new Array(meses.length).fill(0);
-  for (let i = 0; i < meses.length; i++) {
-    const [abbr, year] = meses[i].split(" ");
-    const re = new RegExp(`${abbr}\\s+${year}[\\s\\S]{0,80}?([\\-–\\d.,]+)\\s*Vigente`, "i");
-    const hit = historia.match(re);
-    if (hit) vigente[i] = toNum(hit[1]);
+  const months = [];
+  const vigente = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!MES_RE.test(lines[i])) continue;
+    const month = lines[i];
+    months.push(month);
+
+    // buscar el primer número en las 4 líneas siguientes
+    let found = 0;
+    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
+      const m = lines[j].match(/-?\d[\d.,]*/);
+      if (m) { found = toNum(m[0]); break; }
+    }
+    vigente.push(found);
   }
+  if (!months.length) return [];
 
-  // 5) Capturamos los bloques "Vencido ..." en orden y mapeamos valores secuenciales a los meses
-  const mapBlock = (titleRe) => {
-    const idx = historia.search(titleRe);
-    if (idx === -1) return new Array(meses.length).fill(0);
-    // Tomamos desde el título hasta el siguiente encabezado
-    const tail = historia.slice(idx);
-    const cut = tail.search(/^\s*(Vencido|Calificaci[oó]n\s+de\s+Cartera|INFORMACI[ÓO]N\s+COMERCIAL|FIN DEL REPORTE)/mi);
-    const block = cut !== -1 ? tail.slice(0, cut) : tail;
-    const nums = (block.match(/--|[-–\d.,]+/g) || [])
-      .map(x => (x === "--" ? 0 : toNum(x)))
-      .filter(x => Number.isFinite(x));
-    const out = new Array(meses.length).fill(0);
-    // Tomamos los últimos N números (Buró suele repetir info); si faltan, rellenamos a la izquierda
-    const slice = nums.slice(-meses.length);
-    for (let i = 0; i < slice.length; i++) out[i + (meses.length - slice.length)] = slice[i];
-    return out;
-  };
-
-  const v1_29  = mapBlock(/^\s*Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/mi);
-  const v30_59 = mapBlock(/^\s*Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/mi);
-  const v60_89 = mapBlock(/^\s*Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/mi);
-  const v90p   = mapBlock(/^\s*Vencido\s+a\s+m[aá]s\s+de\s*89\s*d[ií]as\b/mi);
-
-  // 6) Calificación de Cartera: tokens tipo "1A2", "1B1"... (si no hay, dejamos null)
-  const calIdx = historia.search(/^\s*Calificaci[oó]n\s+de\s+Cartera/mi);
-  let ratings = new Array(meses.length).fill(null);
+  // Calificación de cartera (opcional)
+  let ratings = new Array(months.length).fill(null);
+  const calIdx = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
   if (calIdx !== -1) {
-    const tail = historia.slice(calIdx);
-    const cut = tail.search(/^\s*(Vencido|INFORMACI[ÓO]N\s+COMERCIAL|FIN DEL REPORTE)/mi);
-    const block = cut !== -1 ? tail.slice(0, cut) : tail;
-    const toks = (block.match(/\b[0-9][A-Z]\d\b/gi) || []).map(x => x.toUpperCase());
-    const slice = toks.slice(-meses.length);
-    ratings = new Array(meses.length).fill(null);
-    for (let i = 0; i < slice.length; i++) ratings[i + (meses.length - slice.length)] = slice[i];
+    const toks = lines.slice(calIdx + 1).join(" ").match(/\b[0-9][A-Z]\d\b/gi) || [];
+    const slice = toks.slice(-months.length).map(t => t.toUpperCase());
+    ratings = new Array(months.length).fill(null);
+    for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
   }
 
-  // 7) Armamos salida (últimos 12 meses)
-  const rows = meses.map((month, i) => ({
+  return months.slice(-12).map((month, i) => ({
     month,
     vigente: vigente[i] || 0,
-    v1_29:   v1_29[i]   || 0,
-    v30_59:  v30_59[i]  || 0,
-    v60_89:  v60_89[i]  || 0,
-    v90p:    v90p[i]    || 0,
-    rating:  ratings[i] || null
+    v1_29: 0,
+    v30_59: 0,
+    v60_89: 0,
+    v90p: 0,
+    rating: ratings[i] || null
   }));
-  return rows.slice(-12);
 }
 
-/* ======================= HISTORIA MENSUAL — modo rejilla (genérico) ======================= */
+/* ======================= HISTORIA MENSUAL — rejilla genérica ======================= */
 function parseHistoriaMensual(text) {
   const bloqueHistoria = sliceBetween(
     text,
@@ -287,7 +249,7 @@ function parseHistoriaMensual(text) {
       { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
       { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
       { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
-      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s*89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
+      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s*de\s*89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
       { key: "rating",   re: /^Calificaci[oó]n\s+de\s+Cartera\b/i,      numeric: false }
     ];
 
@@ -338,7 +300,7 @@ function parseHistoriaMensual(text) {
     return out.slice(-12);
   }
 
-  // fallback por columnas mes a mes
+  // fallback columna-por-mes
   const isMonth = (s) => new RegExp(`^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\\s+20\\d{2}$`, "i").test(s);
   const result = [];
   for (let i = 0; i < lines.length; i++) {
@@ -363,7 +325,7 @@ function parseHistoriaMensual(text) {
     const v1_29    = pickVal([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
     const v30_59   = pickVal([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
     const v60_89   = pickVal([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
-    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s*89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
+    const v90p     = pickVal([/^(Vencido\s+a\s*m[aá]s\s*de\s*89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
 
     let rating = null;
     const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
@@ -425,7 +387,7 @@ function parseHistoriaMensualDesdeActivos(text) {
   return order.slice(-12);
 }
 
-/* ======================= FIX: Mapear parseHistoriaFromText al mismo formato ======================= */
+/* ======================= MAP & AUTOSCALE ======================= */
 function coerceNum(n) {
   const v = Number(n);
   return Number.isFinite(v) ? v : 0;
@@ -479,7 +441,7 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
-    // Califica (IDs/valores/códigos)
+    // Califica
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
     const valores = {};
     for (const it of indicadores) {
@@ -505,7 +467,7 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual — 0) nuevo parser vertical miles; 1) rejilla; 2) parseHistoriaFromText; 3) desde Activos
+    // Historia mensual — primero vertical (este PDF), luego otros métodos
     let historyMonthly = parseHistoriaVerticalMiles(text);
     if (!historyMonthly || historyMonthly.length === 0) {
       historyMonthly = parseHistoriaMensual(text);
