@@ -3,6 +3,7 @@ import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
+import { parseHistoriaFromText } from "../../lib/parseHistoria.js";
 
 // ❗ Vercel (Node runtimes) — sin bodyParser porque viene multipart
 export const config = {
@@ -391,7 +392,7 @@ export default async function handler(req, res) {
     // Historia mensual — primero intentamos la rejilla; si no existe, calculamos desde “Créditos Activos”
     let historyMonthly = parseHistoriaMensual(text);
     if (!historyMonthly || historyMonthly.length === 0) {
-      historyMonthly = parseHistoriaMensualDesdeActivos(text);
+      historyMonthly = parseHistoriaFromText(text);
     }
 
     // Códigos por ID
