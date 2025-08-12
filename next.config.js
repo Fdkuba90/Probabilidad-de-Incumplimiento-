@@ -6,9 +6,9 @@ const nextConfig = {
       "pdf-parse",
       "formidable",
       "@napi-rs/canvas",
-      "tesseract.js"
+      "tesseract.js",
+      "pdfjs-dist"         // <-- añade esto
     ]
   }
 };
-
 module.exports = nextConfig;
