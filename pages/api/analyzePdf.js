@@ -158,16 +158,16 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA VERTICAL: busca número tras cada mes (×1000) ======================= */
-function parseHistoriaVerticalMiles(text) {
-  const bloque = sliceBetween(
-    text,
+/* ======================= HISTORIA VERTICAL (mes → “Vigente” → número) ======================= */
+function parseHistoriaVerticalMiles(fullText) {
+  const historia = sliceBetween(
+    fullText,
     [/^\s*Historia\b/im],
     [/^\s*INFORMACI[ÓO]N\s+COMERCIAL\b/im, /^\s*Califica\b/im, /^\s*DECLARATIVAS\b/im, /^\s*INFORMACI[ÓO]N\s+DE\s+PLD\b/im, /^\s*FIN DEL REPORTE\b/im]
   );
-  if (!bloque) return [];
+  if (!historia) return [];
 
-  const lines = bloque.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const lines = historia.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
 
   const toNum = (s) => {
@@ -177,31 +177,50 @@ function parseHistoriaVerticalMiles(text) {
     return Number.isFinite(v) ? Math.round(v * 1000) : 0; // miles → MXN
   };
 
+  // indices de meses
   const months = [];
-  const vigente = [];
-
+  const monthIdx = [];
   for (let i = 0; i < lines.length; i++) {
-    if (!MES_RE.test(lines[i])) continue;
-    const month = lines[i];
-    months.push(month);
-
-    // buscar el primer número en las 4 líneas siguientes
-    let found = 0;
-    for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
-      const m = lines[j].match(/-?\d[\d.,]*/);
-      if (m) { found = toNum(m[0]); break; }
+    if (MES_RE.test(lines[i])) {
+      months.push(lines[i]);
+      monthIdx.push(i);
     }
-    vigente.push(found);
   }
   if (!months.length) return [];
 
-  // Calificación de cartera (opcional)
+  // para cada mes, buscar "Vigente" y luego el primer número hasta antes del siguiente mes
+  const vigente = new Array(months.length).fill(0);
+  for (let k = 0; k < months.length; k++) {
+    const start = monthIdx[k];
+    const end = k + 1 < months.length ? monthIdx[k + 1] : Math.min(lines.length, start + 120); // límite de ventana
+    let sawVigente = false;
+    let val = 0;
+
+    for (let j = start; j < end; j++) {
+      const L = lines[j];
+      if (!sawVigente) {
+        if (/^Vigente\b/i.test(L)) {
+          sawVigente = true;
+          // si hay número en misma línea, tomarlo
+          const m = L.match(/-?\d[\d.,]*/);
+          if (m) { val = toNum(m[0]); break; }
+          continue;
+        }
+      } else {
+        const m = L.match(/-?\d[\d.,]*/);
+        if (m) { val = toNum(m[0]); break; }
+      }
+    }
+    vigente[k] = val;
+  }
+
+  // Calificación de Cartera (opcional)
   let ratings = new Array(months.length).fill(null);
-  const calIdx = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
-  if (calIdx !== -1) {
-    const toks = lines.slice(calIdx + 1).join(" ").match(/\b[0-9][A-Z]\d\b/gi) || [];
+  const calStart = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
+  if (calStart !== -1) {
+    const raw = lines.slice(calStart + 1).join(" ");
+    const toks = raw.match(/\b[0-9][A-Z]\d\b/gi) || [];
     const slice = toks.slice(-months.length).map(t => t.toUpperCase());
-    ratings = new Array(months.length).fill(null);
     for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
   }
 
