@@ -1,8 +1,8 @@
-// pages/api/analyzePdf.js — revisión y mejoras (PI CNBV)
+// pages/api/analyzePdf.js — revisión y mejoras (PI CNBV) FULL
 // - Normaliza texto del PDF (NBSP, saltos, miles/decimales) para parsers externos
 // - Maneja "sin historial" para NO aplicar los 285 pb base
 // - Respeta reglas: ID 11 "--" => "sin información"; evita penalizar cuando no hay dato en 9/14
-// - Historia mensual más robusta (4 estrategias)
+// - Historia mensual más robusta (4 estrategias) y fixes para este PDF (Historia:, MES_RE, ratings)
 // - Devuelve warnings/flags para trazabilidad
 
 import formidable from "formidable";
@@ -23,7 +23,7 @@ function normalizeText(text = "") {
   return (text || "")
     .replace(/\u00A0/g, " ")            // NBSP -> space
     .replace(/[\t\r]+/g, " ")           // tabs/CR -> space
-    .replace(/[ ]{2,}/g, " ")            // multi-spaces
+    .replace(/[ ]{2,}/g, " ")           // multi-spaces
     .replace(/\s+\n/g, "\n")
     .replace(/\n\s+/g, "\n");
 }
@@ -153,13 +153,13 @@ function extractEmpresa(text) {
 function parseHistoriaVerticalMiles(fullText) {
   const historia = sliceBetween(
     fullText,
-    [/^\s*Historia\b/im],
+    [/^\s*Historia\b:?/im],
     [/^\s*INFORMACI[ÓO]N\s+COMERCIAL\b/im, /^\s*Califica\b/im, /^\s*DECLARATIVAS\b/im, /^\s*INFORMACI[ÓO]N\s+DE\s+PLD\b/im, /^\s*FIN DEL REPORTE\b/im]
   );
   if (!historia) return [];
 
   const lines = historia.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
+  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
 
   const toNum = (s) => {
     if (!s) return 0;
@@ -196,8 +196,8 @@ function parseHistoriaVerticalMiles(fullText) {
   let ratings = new Array(months.length).fill(null);
   const calStart = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
   if (calStart !== -1) {
-    const raw = lines.slice(calStart + 1).join(" ");
-    const toks = raw.match(/\b[0-9][A-Z]\d\b/gi) || [];
+    const raw = lines.slice(calStart, calStart + 40).join(" ");
+    const toks = raw.match(/\b\d[A-Z]\d\b/gi) || [];
     const slice = toks.slice(-months.length).map(t => t.toUpperCase());
     for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
   }
@@ -324,8 +324,8 @@ function parseHistoriaMensual(text) {
     let rating = null;
     const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
     if (carLine) {
-      const toks = carLine.split(/\s+/).filter(Boolean);
-      rating = toks[toks.length - 1] || null;
+      const m = carLine.match(/\b\d[A-Z]\d\b/gi);
+      rating = m ? m[m.length - 1].toUpperCase() : null;
     }
 
     result.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
@@ -343,6 +343,7 @@ function parseHistoriaMensualDesdeActivos(text) {
   );
   if (!bloque) return [];
 
+  // Formato mm-aaaa + 9 números
   const re = /([01]\d-\d{4})\s+(\d{1,6})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})/g;
   const agg = new Map();
   const toMonthToken = (mmYYYY) => {
@@ -478,10 +479,6 @@ function calcularPI(score) {
 
 /* ======================= DETECCIÓN DE HISTORIAL ======================= */
 function detectaSinHistorial({ valores, historyMonthly, resumen }) {
-  // Heurística conservadora: sin historia si
-  // - totales nulos o 0
-  // - y no hay meses con montos > 0
-  // - y la mayoría de indicadores clave vienen "--" o vacíos
   const tot0 = [resumen.totalSaldoActualPesos, resumen.totalVigentePesos, resumen.totalOriginalPesos]
     .every(v => !v || v === 0);
   const meses0 = !(Array.isArray(historyMonthly) && historyMonthly.some(r => (r.vigente||0) > 0 || (r.v90p||0) > 0));
