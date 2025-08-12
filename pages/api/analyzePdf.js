@@ -45,10 +45,16 @@ function calcularPI(score) {
 /* ---------------- Helpers bloque “Totales” ---------------- */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
-  for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
+  for (const re of fromReList) {
+    const i = txt.search(re);
+    if (i !== -1) { fromIdx = i; break; }
+  }
   if (fromIdx === -1) return "";
   const rest = txt.slice(fromIdx);
-  for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
+  for (const re of toReList) {
+    const j = rest.search(re);
+    if (j !== -1) return rest.slice(0, j);
+  }
   return rest;
 }
 
@@ -141,28 +147,35 @@ function parseResumenActivosRobusto(text) {
   };
 }
 
-/* ---------------- Extraer Nombre/Razón Social ---------------- */
+/* ---------------- Extraer Nombre/Razón Social (mejorado) ---------------- */
 function extractEmpresa(text) {
-  // Caso 1: “Nombre/Razón Social: <nombre>”
+  // 1) Mismo renglón que el label
   let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
   if (m) {
     const cand = m[1].trim();
-    if (cand) return cand;
+    if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
-  // Caso 2: “<nombre>Nombre/Razón Social:” (nombre pegado antes)
+
+  // 2) Renglón anterior al label
   m = text.match(/([^\n\r]+?)\s*Nombre\/Raz[oó]n Social:/i);
   if (m) {
     const cand = m[1].trim();
-    if (cand) return cand;
+    if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
-  // Caso 3: línea previa a “Nombre/Razón Social:” si viene en salto
+
+  // 3) Renglón siguiente al label (caso frecuente)
   const idx = text.search(/Nombre\/Raz[oó]n Social:/i);
-  if (idx > 0) {
-    const head = text.slice(Math.max(0, idx - 120), idx);
-    const lines = head.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    if (lines.length) {
-      const last = lines[lines.length - 1];
-      if (last && !/^(RFC|CURP|Direcci[oó]n|Datos Generales)/i.test(last)) return last;
+  if (idx >= 0) {
+    const tail = text.slice(idx).split(/\r?\n/);
+    for (let i = 1; i < Math.min(tail.length, 5); i++) {
+      const cand = (tail[i] || "").trim();
+      if (!cand) continue;
+      // Saltar campos típicos y encabezados
+      if (/^(Direcci[oó]n|RFC|CURP|Datos Generales|Colonia|Del\.?\/Mun|Ciudad|C[óo]digo Postal|Estado|Pa[ií]s|Tel[eé]fono|Fax)/i.test(cand)) {
+        continue;
+      }
+      // Si parece razón social, tómalo; en su defecto, usa la primera línea no vacía válida
+      return cand;
     }
   }
   return null;
@@ -220,7 +233,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       meta: { pages: parsed?.numpages || null },
-      empresa: nombreEmpresa,              // <-- nuevo
+      empresa: nombreEmpresa,
       calificaRaw,
       indicadores,
       codigos,
