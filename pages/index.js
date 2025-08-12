@@ -6,6 +6,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
+  const [showDebug, setShowDebug] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -20,6 +21,15 @@ export default function Home() {
 
       const res = await fetch("/api/analyzePdf", { method: "POST", body: fd });
       const json = await res.json();
+
+      // Mostramos también un resumen por si todo viene en cero
+      const hm = Array.isArray(json?.historyMonthly) ? json.historyMonthly : [];
+      const allZero = hm.length > 0 && hm.every(r =>
+        (r.vigente ?? 0) === 0 && (r.v1_29 ?? 0) === 0 &&
+        (r.v30_59 ?? 0) === 0 && (r.v60_89 ?? 0) === 0 && (r.v90p ?? 0) === 0
+      );
+      if (allZero) setShowDebug(true);
+
       if (!res.ok) throw new Error(json?.error || "Error en análisis");
       setData(json);
     } catch (e) {
@@ -74,6 +84,31 @@ export default function Home() {
 
       {busy && <p>Procesando PDF…</p>}
       {err && <p style={{ color: "crimson" }}>{err}</p>}
+
+      {/* Panel DEBUG visible sin DevTools */}
+      {data && (
+        <div style={{ margin: "12px 0" }}>
+          <button
+            type="button"
+            onClick={() => setShowDebug(v => !v)}
+            style={{ padding: "6px 10px" }}
+          >
+            {showDebug ? "Ocultar" : "Ver"} respuesta cruda (debug)
+          </button>
+          {showDebug && (
+            <div style={{ marginTop: 8, background: "#0b1020", color: "#e6f3ff", padding: 12, borderRadius: 8, overflow: "auto" }}>
+              <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>
+{JSON.stringify({
+  empresa: data?.empresa,
+  puntajeTotal: data?.puntajeTotal,
+  summary: data?.summary,
+  historyMonthly: data?.historyMonthly
+}, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
 
       {data && (
         <>
