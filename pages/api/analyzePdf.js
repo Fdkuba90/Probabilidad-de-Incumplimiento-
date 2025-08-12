@@ -58,7 +58,6 @@ function sliceBetween(txt, fromReList, toReList) {
   return rest;
 }
 
-// Divide tokens pegados tipo "28892442" → ["2889","2442"]
 function splitStuckToken(tok) {
   const s = String(tok);
   if (/^\d{7,10}$/.test(s)) {
@@ -80,10 +79,6 @@ function pickNumbersNormalized(str) {
 
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
-/**
- * Busca la línea/ventana de “Totales:” y obtiene [Original, Saldo, Vigente]
- * Heurística: último trío (a,b,c) de 3–6 dígitos donde dos sean iguales.
- */
 function parseResumenActivosRobusto(text) {
   const fromReList = [
     /Resumen\s*(de)?\s*Cr[eé]ditos?\s+Activos?/i,
@@ -112,7 +107,6 @@ function parseResumenActivosRobusto(text) {
   const nums = pickNumbersNormalized(window)
     .filter(n => n >= 1 && n <= 999999);
 
-  // último trío con dos iguales
   let triple = null;
   for (let i = 0; i <= nums.length - 3; i++) {
     const a = nums[i], b = nums[i+1], c = nums[i+2];
@@ -147,38 +141,96 @@ function parseResumenActivosRobusto(text) {
   };
 }
 
-/* ---------------- Extraer Nombre/Razón Social (mejorado) ---------------- */
+/* ---------------- Extraer Nombre/Razón Social (robusto) ---------------- */
 function extractEmpresa(text) {
-  // 1) Mismo renglón que el label
   let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
   if (m) {
     const cand = m[1].trim();
     if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
-
-  // 2) Renglón anterior al label
   m = text.match(/([^\n\r]+?)\s*Nombre\/Raz[oó]n Social:/i);
   if (m) {
     const cand = m[1].trim();
     if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
-
-  // 3) Renglón siguiente al label (caso frecuente)
   const idx = text.search(/Nombre\/Raz[oó]n Social:/i);
   if (idx >= 0) {
     const tail = text.slice(idx).split(/\r?\n/);
     for (let i = 1; i < Math.min(tail.length, 5); i++) {
       const cand = (tail[i] || "").trim();
       if (!cand) continue;
-      // Saltar campos típicos y encabezados
       if (/^(Direcci[oó]n|RFC|CURP|Datos Generales|Colonia|Del\.?\/Mun|Ciudad|C[óo]digo Postal|Estado|Pa[ií]s|Tel[eé]fono|Fax)/i.test(cand)) {
         continue;
       }
-      // Si parece razón social, tómalo; en su defecto, usa la primera línea no vacía válida
       return cand;
     }
   }
   return null;
+}
+
+/* ---------------- Historia mensual (Vigente & moras) ---------------- */
+const MES_RE = "(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\\s+20\\d{2}";
+function parseHistoriaMensual(text) {
+  // Cortamos la sección Historia → (siguiente sección típica)
+  const bloque = sliceBetween(
+    text,
+    [/Historia:/i, /Historia\s*:/i],
+    [/(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(DECLARATIVAS)/i, /(INFORMACI[ÓO]N\s+DE PLD)/i]
+  ) || text;
+
+  const lines = bloque.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+  const isMonth = (s) => new RegExp(`^${MES_RE}$`, "i").test(s);
+  const normNum = (s) => {
+    const m = s.replace(/[^0-9\-]/g, "");
+    return m ? parseInt(m, 10) : 0;
+  };
+
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (!isMonth(ln)) continue;
+
+    const month = ln;
+    // Buscamos en las ~15 líneas siguientes los renglones de interés
+    const slice = lines.slice(i + 1, i + 16);
+
+    // Expresiones tolerantes a variantes
+    const reVig = /^Vigente/i;
+    const re129 = /1-?29\s*d[ií]as/i;
+    const re3059 = /30-?59\s*d[ií]as/i;
+    const re6089 = /60-?89\s*d[ií]as/i;
+    const re90p = /(m[aá]s de 89\s*d[ií]as|90\+|>89)/i;
+    const reCar = /^Calificaci[oó]n\s+de\s+Cartera/i;
+
+    const takeVal = (re) => {
+      const row = slice.find(s => re.test(s));
+      if (!row) return 0;
+      // Toma el último número de la línea (están en miles de pesos)
+      const nums = row.match(/-?\d[\d,\.]*/g);
+      const last = nums ? nums[nums.length - 1] : "0";
+      return toPesosMiles(normNum(last)); // → pesos
+    };
+
+    const vigente  = takeVal(reVig);
+    const v1_29    = takeVal(re129);
+    const v30_59   = takeVal(re3059);
+    const v60_89   = takeVal(re6089);
+    const v90p     = takeVal(re90p);
+
+    let rating = null;
+    const carLine = slice.find(s => reCar.test(s));
+    if (carLine) {
+      // ejemplo: "Calificación de Cartera   1EX7A" → extraemos token final
+      const toks = carLine.split(/\s+/).filter(Boolean);
+      rating = toks[toks.length - 1] || null;
+    }
+
+    result.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
+  }
+
+  // Si hay más de 12, devolvemos los últimos 12 (lo más reciente suele venir al final)
+  return result.slice(-12);
 }
 
 /* ---------------- Handler ---------------- */
@@ -224,6 +276,9 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
+    // Historia mensual
+    const historyMonthly = parseHistoriaMensual(text);
+
     // Códigos por ID
     const codigos = {};
     indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
@@ -248,6 +303,7 @@ export default async function handler(req, res) {
         totalVencidoPesos,
         maxCreditPesos: pesosMax,
       },
+      historyMonthly, // <-- NUEVO
     });
   } catch (e) {
     console.error("analyzePdf error:", e);
