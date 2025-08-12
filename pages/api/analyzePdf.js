@@ -1,9 +1,10 @@
-// pages/api/analyzePdf.js — Robust JSON responses + Historia anclada a "Historia:" + normalizador Califica + PI
+// pages/api/analyzePdf.js — Robust JSON + Historia anclada a "Historia:" + OCR fallback + normalizador Califica + PI
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
 import { parseHistoriaFromText } from "../../lib/parseHistoria.js";
+import { ocrHistoriaFromPdf } from "../../lib/ocrHistoria";
 
 export const config = {
   api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
@@ -59,12 +60,9 @@ function parseNumLoose(v) {
   if (v == null) return null;
   let s = String(v).trim().replace(/\u00A0/g, " ").replace(/\s+/g, "");
   if (s === "" || s === "--") return null;
-  // coma decimal sin punto -> úsala como decimal
-  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
-  // separadores de miles residuales (espacios o punto como miles)
-  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, "");
-  // comas de miles residuales
-  s = s.replace(/,(?=\d{3}(?:\D|$))/g, "");
+  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, "."); // coma decimal
+  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, ""); // miles con punto/espacio
+  s = s.replace(/,(?=\d{3}(?:\D|$))/g, "");            // miles con coma
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
@@ -107,7 +105,7 @@ function parseResumenActivosRobusto(text) {
                  || (text.match(/Totales[^\n]*/i) || [])[0];
   if (!lineMatch) {
     return { totalOriginalPesos: null, totalSaldoActualPesos: null, totalVigentePesos: null, totalVencidoPesos: null };
-    }
+  }
 
   const base = bloque && bloque.includes(lineMatch) ? bloque : text;
   const pos = base.indexOf(lineMatch);
@@ -200,7 +198,7 @@ function extractHistoriaMonths(fullText) {
   return months.slice(-12);
 }
 
-/* ======================= Lector de tabla/segmento "Historia:" ======================= */
+/* ======================= Lector Historia por texto (segmento) ======================= */
 function parseHistoriaTablaPrecisa(fullText) {
   const bloque = getHistoriaBlock(fullText);
   if (!bloque) return [];
@@ -237,12 +235,12 @@ function parseHistoriaTablaPrecisa(fullText) {
 
     let vigente = 0;
     let m = seg.match(BEFORE_VIG);
-    if (m && m[1]) {
+    if (m?.[1]) {
       const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v;
     }
     if (!vigente) {
       m = seg.match(AFTER_VIG);
-      if (m && m[1]) {
+      if (m?.[1]) {
         const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v;
       }
     }
@@ -347,7 +345,7 @@ function parseHistoriaMensual(text) {
   return out.slice(-12);
 }
 
-/* ======================= HISTORIA — desde Activos (sólo si NO hay Historia) ======================= */
+/* ======================= HISTORIA — desde Activos (último recurso) ======================= */
 function parseHistoriaMensualDesdeActivos(text) {
   const bloque = sliceBetween(
     text,
@@ -493,7 +491,7 @@ export default async function handler(req, res) {
     /* ---- Totales ---- */
     const resumen = parseResumenActivosRobusto(text);
 
-    /* ---- Historia: preferimos "Historia:" (tabla/segmento), luego rejilla; lib; y por último "desde Activos" si no hay Historia ---- */
+    /* ---- Historia por texto ---- */
     const canonicalMonths = extractHistoriaMonths(text); // indica si hay sección Historia real
     let historyMonthly = parseHistoriaTablaPrecisa(text);
 
@@ -506,10 +504,34 @@ export default async function handler(req, res) {
       if (h2 && h2.length) historyMonthly = h2;
     }
 
-    // Sólo si NO hay Historia en el PDF, usamos "desde Activos"
+    // Solo si NO hay Historia en el PDF, usamos "desde Activos"
     if (!canonicalMonths.length && (!historyMonthly.length || historyMonthly.every(r => !r.vigente))) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
       if (h3 && h3.length) historyMonthly = h3;
+    }
+
+    // Si seguimos vacíos o claramente viejos (p.ej. contiene años << año máximo detectado), probar OCR
+    let usedOCR = false;
+    const looksOld = () => {
+      if (!historyMonthly?.length) return true;
+      const years = historyMonthly
+        .map(r => parseMonthToken(r.month)?.y)
+        .filter(Number.isFinite);
+      if (!years.length) return true;
+      const maxY = Math.max(...years);
+      return years.some(y => maxY - y >= 3); // hay meses >3 años más viejos que el más reciente ⇒ sospechoso
+    };
+
+    if (!historyMonthly.length || looksOld()) {
+      try {
+        const ocrRows = await ocrHistoriaFromPdf(buffer);
+        if (ocrRows && ocrRows.length) {
+          historyMonthly = ocrRows;
+          usedOCR = true;
+        }
+      } catch (e) {
+        console.error("OCR Historia falló:", e);
+      }
     }
 
     // Orden cronológico y últimos 12
@@ -520,8 +542,9 @@ export default async function handler(req, res) {
       historyMonthly = [];
     }
 
-    /* ---- Flags de consistencia (opcionales) ---- */
+    /* ---- Flags ---- */
     const flags = [];
+    if (usedOCR) flags.push({ tipo: "historia_ocr", detalle: "Historia tomada por OCR ante layout irregular" });
     if (Number.isFinite(pesosMax) && resumen.totalSaldoActualPesos != null) {
       const diff = Math.abs(pesosMax - resumen.totalSaldoActualPesos);
       const big = Math.max(1, resumen.totalSaldoActualPesos);
