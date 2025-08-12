@@ -12,9 +12,9 @@
     "pdf-parse": "^1.1.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "pdfjs-dist": "^4.3.136",
     "@napi-rs/canvas": "^0.1.53",
-    "@tesseract.js/worker": "^4.0.3",
-    "pdfjs-dist": "^4.0.379"
+    "@tesseract.js/worker": "^5.0.3"
   },
   "engines": {
     "node": ">=18"
