@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback + normalizador Califica + PI
+// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback (import dinámico) + normalizador Califica + PI
 export const runtime = 'nodejs';
 
 import formidable from "formidable";
@@ -511,31 +511,30 @@ export default async function handler(req, res) {
       if (h3 && h3.length) historyMonthly = h3;
     }
 
-    // Si seguimos vacíos o claramente viejos, probar OCR
-let usedOCR = false;
-const looksOld = () => {
-  if (!historyMonthly?.length) return true;
-  const years = historyMonthly
-    .map(r => parseMonthToken(r.month)?.y)
-    .filter(Number.isFinite);
-  if (!years.length) return true;
-  const maxY = Math.max(...years);
-  return years.some(y => maxY - y >= 3);
-};
+    // Si seguimos vacíos o claramente viejos, probar OCR (IMPORT DINÁMICO)
+    let usedOCR = false;
+    const looksOld = () => {
+      if (!historyMonthly?.length) return true;
+      const years = historyMonthly
+        .map(r => parseMonthToken(r.month)?.y)
+        .filter(Number.isFinite);
+      if (!years.length) return true;
+      const maxY = Math.max(...years);
+      return years.some(y => maxY - y >= 3);
+    };
 
-if (!historyMonthly.length || looksOld()) {
-  try {
-    // IMPORT DINÁMICO: evita que Vercel lo cargue durante el build
-    const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
-    const ocrRows = await ocrHistoriaFromPdf(buffer);
-    if (ocrRows && ocrRows.length) {
-      historyMonthly = ocrRows;
-      usedOCR = true;
+    if (!historyMonthly.length || looksOld()) {
+      try {
+        const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
+        const ocrRows = await ocrHistoriaFromPdf(buffer);
+        if (ocrRows && ocrRows.length) {
+          historyMonthly = ocrRows;
+          usedOCR = true;
+        }
+      } catch (e) {
+        console.error("OCR Historia falló:", e);
+      }
     }
-  } catch (e) {
-    console.error("OCR Historia falló:", e);
-  }
-}
 
     // Orden cronológico y últimos 12
     if (Array.isArray(historyMonthly)) {
