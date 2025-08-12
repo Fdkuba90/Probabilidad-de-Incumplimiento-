@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback (import dinámico) + normalizador Califica + PI
+// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback (dinámico) + selector inteligente + normalizador Califica + PI
 export const runtime = 'nodejs';
 
 import formidable from "formidable";
@@ -417,6 +417,20 @@ function mapHistoriaFromLib(hObj) {
   return autoscaleHistory(arr);
 }
 
+/* ======================= Selector inteligente historia ======================= */
+function statsDeHistoria(arr = []) {
+  const ys = arr.map(r => parseMonthToken(r.month)?.y).filter(Number.isFinite);
+  const maxY = ys.length ? Math.max(...ys) : -Infinity;
+  return { n: arr.length, maxY };
+}
+function elegirMejorHistoria(baseArr = [], ocrArr = []) {
+  const A = statsDeHistoria(baseArr);
+  const B = statsDeHistoria(ocrArr);
+  if (B.n > A.n) return { ganador: ocrArr, fuente: "ocr" };
+  if (B.n === A.n && B.maxY > A.maxY) return { ganador: ocrArr, fuente: "ocr" };
+  return { ganador: baseArr, fuente: "texto/activos" };
+}
+
 /* ======================= Scoring & PI ======================= */
 function puntuar(val, flags) {
   const pts = {};
@@ -504,46 +518,52 @@ export default async function handler(req, res) {
       const h2 = mapHistoriaFromLib(parseHistoriaFromText(text));
       if (h2 && h2.length) historyMonthly = h2;
     }
-// --- NUEVO: si hay bloque "Historia:" pero lo leído por texto luce raro, forzar OCR
-const looksRaro = () => {
-  const hm = historyMonthly || [];
-  const todosCeros = hm.length && hm.every(r =>
-    (r.vigente||0)===0 && (r.v1_29||0)===0 &&
-    (r.v30_59||0)===0 && (r.v60_89||0)===0 && (r.v90p||0)===0
-  );
-  const muyPocosMeses = hm.length > 0 && canonicalMonths.length > 0 && hm.length < Math.min(8, canonicalMonths.length);
-  return todosCeros || muyPocosMeses;
-};
+
     // Solo si NO hay Historia en el PDF, usamos "desde Activos"
     if (!canonicalMonths.length && (!historyMonthly.length || historyMonthly.every(r => !r.vigente))) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
       if (h3 && h3.length) historyMonthly = h3;
     }
 
-   // Si seguimos vacíos, luce raro, o claramente viejo, probar OCR y priorizarlo
-let usedOCR = false;
-const looksOld = () => {
-  const hm = historyMonthly || [];
-  if (!hm.length) return true;
-  const years = hm.map(r => parseMonthToken(r.month)?.y).filter(Number.isFinite);
-  if (!years.length) return true;
-  const maxY = Math.max(...years);
-  return years.some(y => maxY - y >= 3);
-};
+    /* ---- OCR y selector inteligente ---- */
+    const looksOld = () => {
+      const hm = historyMonthly || [];
+      if (!hm.length) return true;
+      const years = hm.map(r => parseMonthToken(r.month)?.y).filter(Number.isFinite);
+      if (!years.length) return true;
+      const maxY = Math.max(...years);
+      return years.some(y => maxY - y >= 3);
+    };
+    const looksRaro = () => {
+      const hm = historyMonthly || [];
+      const todosCeros = hm.length && hm.every(r =>
+        (r.vigente||0)===0 && (r.v1_29||0)===0 &&
+        (r.v30_59||0)===0 && (r.v60_89||0)===0 && (r.v90p||0)===0
+      );
+      const muyPocosMeses = hm.length > 0 && canonicalMonths.length > 0 &&
+                            hm.length < Math.min(8, canonicalMonths.length);
+      return todosCeros || muyPocosMeses;
+    };
 
-if (!historyMonthly.length || looksOld() || (canonicalMonths.length && looksRaro())) {
-  try {
-    const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
-    const ocrRows = await ocrHistoriaFromPdf(buffer);
-    if (ocrRows && ocrRows.length) {
-      historyMonthly = ocrRows;        // priorizamos OCR si trae datos
-      usedOCR = true;
+    let usedOCR = false;
+    let ocrIntentado = false;
+    let ocrRows = [];
+
+    if (!historyMonthly.length || looksOld() || (canonicalMonths.length && looksRaro())) {
+      try {
+        ocrIntentado = true;
+        const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
+        ocrRows = await ocrHistoriaFromPdf(buffer);
+      } catch (e) {
+        console.error("OCR Historia falló:", e);
+      }
     }
-  } catch (e) {
-    console.error("OCR Historia falló:", e);
-  }
-}
 
+    if (ocrRows && ocrRows.length) {
+      const { ganador, fuente } = elegirMejorHistoria(historyMonthly, ocrRows);
+      usedOCR = (fuente === "ocr");
+      historyMonthly = ganador;
+    }
 
     // Orden cronológico y últimos 12
     if (Array.isArray(historyMonthly)) {
@@ -555,7 +575,8 @@ if (!historyMonthly.length || looksOld() || (canonicalMonths.length && looksRaro
 
     /* ---- Flags ---- */
     const flags = [];
-    if (usedOCR) flags.push({ tipo: "historia_ocr", detalle: "Historia tomada por OCR ante layout irregular" });
+    if (ocrIntentado) flags.push({ tipo: "historia_ocr_intentado", detalle: `ocrRows=${ocrRows?.length||0}` });
+    if (usedOCR) flags.push({ tipo: "historia_ocr", detalle: "Se eligió OCR por tener más/mas reciente" });
     if (Number.isFinite(pesosMax) && resumen.totalSaldoActualPesos != null) {
       const diff = Math.abs(pesosMax - resumen.totalSaldoActualPesos);
       const big = Math.max(1, resumen.totalSaldoActualPesos);
