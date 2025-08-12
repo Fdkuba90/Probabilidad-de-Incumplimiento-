@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback (dinámico) + selector inteligente + normalizador Califica + PI
+// pages/api/analyzePdf.js — Historia anclada a "Historia:", OCR dinámico, filtro por meses canónicos, normalizador Califica y PI
 export const runtime = 'nodejs';
 
 import formidable from "formidable";
@@ -417,7 +417,15 @@ function mapHistoriaFromLib(hObj) {
   return autoscaleHistory(arr);
 }
 
-/* ======================= Selector inteligente historia ======================= */
+/* ======================= Filtro por meses canónicos ======================= */
+function filterByCanonical(history = [], canonical = []) {
+  if (!Array.isArray(history) || !history.length) return [];
+  if (!Array.isArray(canonical) || !canonical.length) return history;
+  const set = new Set(canonical);
+  return history.filter(r => set.has(r.month));
+}
+
+/* ======================= Selector inteligente historia (texto vs OCR) ======================= */
 function statsDeHistoria(arr = []) {
   const ys = arr.map(r => parseMonthToken(r.month)?.y).filter(Number.isFinite);
   const maxY = ys.length ? Math.max(...ys) : -Infinity;
@@ -507,7 +515,7 @@ export default async function handler(req, res) {
     const resumen = parseResumenActivosRobusto(text);
 
     /* ---- Historia por texto ---- */
-    const canonicalMonths = extractHistoriaMonths(text); // indica si hay sección Historia real
+    const canonicalMonths = extractHistoriaMonths(text); // meses reales de la sección "Historia:"
     let historyMonthly = parseHistoriaTablaPrecisa(text);
 
     if ((!historyMonthly.length || historyMonthly.every(r => !r.vigente)) ) {
@@ -519,13 +527,13 @@ export default async function handler(req, res) {
       if (h2 && h2.length) historyMonthly = h2;
     }
 
-    // Solo si NO hay Historia en el PDF, usamos "desde Activos"
+    // Si NO hay Historia en el PDF, usamos "desde Activos"
     if (!canonicalMonths.length && (!historyMonthly.length || historyMonthly.every(r => !r.vigente))) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
       if (h3 && h3.length) historyMonthly = h3;
     }
 
-    /* ---- OCR y selector inteligente ---- */
+    /* ---- OCR (dinámico) y selector inteligente ---- */
     const looksOld = () => {
       const hm = historyMonthly || [];
       if (!hm.length) return true;
@@ -565,6 +573,13 @@ export default async function handler(req, res) {
       historyMonthly = ganador;
     }
 
+    /* ---- Filtro por meses canónicos si existe la sección Historia ---- */
+    const antesFiltro = Array.isArray(historyMonthly) ? historyMonthly.length : 0;
+    if (canonicalMonths.length && historyMonthly?.length) {
+      historyMonthly = filterByCanonical(historyMonthly, canonicalMonths);
+    }
+    const despuesFiltro = Array.isArray(historyMonthly) ? historyMonthly.length : 0;
+
     // Orden cronológico y últimos 12
     if (Array.isArray(historyMonthly)) {
       historyMonthly.sort((a, b) => compareMonthTok(a.month, b.month));
@@ -577,6 +592,7 @@ export default async function handler(req, res) {
     const flags = [];
     if (ocrIntentado) flags.push({ tipo: "historia_ocr_intentado", detalle: `ocrRows=${ocrRows?.length||0}` });
     if (usedOCR) flags.push({ tipo: "historia_ocr", detalle: "Se eligió OCR por tener más/mas reciente" });
+    if (canonicalMonths.length) flags.push({ tipo: "historia_filtrada_canon", detalle: `antes=${antesFiltro}, despues=${despuesFiltro}` });
     if (Number.isFinite(pesosMax) && resumen.totalSaldoActualPesos != null) {
       const diff = Math.abs(pesosMax - resumen.totalSaldoActualPesos);
       const big = Math.max(1, resumen.totalSaldoActualPesos);
