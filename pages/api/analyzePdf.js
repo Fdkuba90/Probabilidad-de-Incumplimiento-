@@ -504,7 +504,16 @@ export default async function handler(req, res) {
       const h2 = mapHistoriaFromLib(parseHistoriaFromText(text));
       if (h2 && h2.length) historyMonthly = h2;
     }
-
+// --- NUEVO: si hay bloque "Historia:" pero lo leído por texto luce raro, forzar OCR
+const looksRaro = () => {
+  const hm = historyMonthly || [];
+  const todosCeros = hm.length && hm.every(r =>
+    (r.vigente||0)===0 && (r.v1_29||0)===0 &&
+    (r.v30_59||0)===0 && (r.v60_89||0)===0 && (r.v90p||0)===0
+  );
+  const muyPocosMeses = hm.length > 0 && canonicalMonths.length > 0 && hm.length < Math.min(8, canonicalMonths.length);
+  return todosCeros || muyPocosMeses;
+};
     // Solo si NO hay Historia en el PDF, usamos "desde Activos"
     if (!canonicalMonths.length && (!historyMonthly.length || historyMonthly.every(r => !r.vigente))) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
