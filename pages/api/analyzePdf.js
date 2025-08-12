@@ -1,9 +1,9 @@
-// pages/api/analyzePdf.js — revisión y mejoras (PI CNBV) FULL
-// - Normaliza texto del PDF (NBSP, saltos, miles/decimales) para parsers externos
-// - Maneja "sin historial" para NO aplicar los 285 pb base
-// - Respeta reglas: ID 11 "--" => "sin información"; evita penalizar cuando no hay dato en 9/14
-// - Historia mensual más robusta (4 estrategias) y fixes para este PDF (Historia:, MES_RE, ratings)
-// - Devuelve warnings/flags para trazabilidad
+// pages/api/analyzePdf.js — versión completa con extractor de Historia robusto (tolerante a dígitos con espacios)
+// - Normaliza el texto del PDF
+// - Historia mensual (vertical) usando NUM_TOKEN que re-arma números tipo "8 7 3 2" -> 8732
+// - Fija Calificación de Cartera con tokens tipo 1A2, 1C2
+// - Aplica/no aplica 285 pb según "sin historial" (heurística)
+// - Devuelve flags de trazabilidad
 
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
@@ -23,7 +23,7 @@ function normalizeText(text = "") {
   return (text || "")
     .replace(/\u00A0/g, " ")            // NBSP -> space
     .replace(/[\t\r]+/g, " ")           // tabs/CR -> space
-    .replace(/[ ]{2,}/g, " ")           // multi-spaces
+    .replace(/[ ]{2,}/g, " ")            // multi-spaces
     .replace(/\s+\n/g, "\n")
     .replace(/\n\s+/g, "\n");
 }
@@ -149,7 +149,7 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA — Estrategia 0: vertical (miles) ======================= */
+/* ======================= HISTORIA — Estrategia 0: vertical (miles, robusto) ======================= */
 function parseHistoriaVerticalMiles(fullText) {
   const historia = sliceBetween(
     fullText,
@@ -161,15 +161,23 @@ function parseHistoriaVerticalMiles(fullText) {
   const lines = historia.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
 
-  const toNum = (s) => {
-    if (!s) return 0;
+  // Acepta números con dígitos separados por espacios/NBSP y/o separadores de miles
+  const NUM_TOKEN = /-?(?:\d[\s\u00A0.,]?){1,12}/g;
+  const toNumRobusto = (s) => {
+    if (!s) return NaN;
     const canon = String(s)
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")
-      .replace(/,/g, ".");
-    const v = Number(canon);
-    return Number.isFinite(v) ? Math.round(v * 1000) : 0;
+      .replace(/\u00A0/g, " ")
+      .replace(/\s+/g, "")       // "8 7 3 2" -> "8732"
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "") // separadores de miles
+      .replace(/,/g, ".");       // coma decimal a punto
+    const n = Number(canon);
+    if (!Number.isFinite(n)) return NaN;
+    if (n < 0) return NaN;
+    if (String(Math.trunc(n)).length < 3) return NaN; // evita tokens sueltos (1–2 dígitos)
+    return Math.round(n * 1000); // PDF viene en miles de pesos
   };
 
+  // localizar meses
   const months = [];
   const monthIdx = [];
   for (let i = 0; i < lines.length; i++) {
@@ -179,24 +187,33 @@ function parseHistoriaVerticalMiles(fullText) {
 
   const vigente = new Array(months.length).fill(0);
 
+  // por cada mes: escanear hasta el inicio del siguiente mes
   for (let k = 0; k < months.length; k++) {
     const start = monthIdx[k];
     const end = k + 1 < months.length ? monthIdx[k + 1] : Math.min(lines.length, start + 120);
-    const seg = lines.slice(start + 1, end).join(" ");
 
-    const nums = seg.match(/-?\d[\d.,]*/g) || [];
-    if (nums.length) {
-      const values = nums.map(toNum).filter(n => Number.isFinite(n));
-      vigente[k] = values.length ? Math.max(...values) : 0;
-    } else {
-      vigente[k] = 0;
+    // buscamos en el bloque completo entre meses
+    const seg = lines.slice(start + 1, end).join(" ");
+    const tokens = seg.match(NUM_TOKEN) || [];
+    let values = tokens.map(toNumRobusto).filter(Number.isFinite);
+
+    // si no hay valores grandes, intenta también las primeras líneas del bloque
+    if (!values.length) {
+      const head = lines.slice(start + 1, Math.min(end, start + 8)).join(" ");
+      const headTokens = head.match(NUM_TOKEN) || [];
+      values = headTokens.map(toNumRobusto).filter(Number.isFinite);
     }
+
+    // acota a valores razonables (0–50,000,000 MXN)
+    const filtered = values.filter(v => v >= 0 && v <= 50_000_000);
+    vigente[k] = (filtered.length ? Math.max(...filtered) : (values.length ? Math.max(...values) : 0));
   }
 
+  // Calificación de Cartera (tokens tipo 1A2, 1C2, etc.)
   let ratings = new Array(months.length).fill(null);
   const calStart = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
   if (calStart !== -1) {
-    const raw = lines.slice(calStart, calStart + 40).join(" ");
+    const raw = lines.slice(calStart, calStart + 60).join(" ");
     const toks = raw.match(/\b\d[A-Z]\d\b/gi) || [];
     const slice = toks.slice(-months.length).map(t => t.toUpperCase());
     for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
@@ -343,7 +360,6 @@ function parseHistoriaMensualDesdeActivos(text) {
   );
   if (!bloque) return [];
 
-  // Formato mm-aaaa + 9 números
   const re = /([01]\d-\d{4})\s+(\d{1,6})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})/g;
   const agg = new Map();
   const toMonthToken = (mmYYYY) => {
