@@ -1,4 +1,6 @@
-// pages/api/analyzePdf.js — Robust JSON + Historia anclada a "Historia:" + OCR fallback + normalizador Califica + PI
+// pages/api/analyzePdf.js — JSON robusto + Historia anclada a "Historia:" + OCR fallback + normalizador Califica + PI
+export const runtime = 'nodejs';
+
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
@@ -510,7 +512,7 @@ export default async function handler(req, res) {
       if (h3 && h3.length) historyMonthly = h3;
     }
 
-    // Si seguimos vacíos o claramente viejos (p.ej. contiene años << año máximo detectado), probar OCR
+    // Si seguimos vacíos o claramente viejos, probar OCR
     let usedOCR = false;
     const looksOld = () => {
       if (!historyMonthly?.length) return true;
@@ -519,7 +521,7 @@ export default async function handler(req, res) {
         .filter(Number.isFinite);
       if (!years.length) return true;
       const maxY = Math.max(...years);
-      return years.some(y => maxY - y >= 3); // hay meses >3 años más viejos que el más reciente ⇒ sospechoso
+      return years.some(y => maxY - y >= 3);
     };
 
     if (!historyMonthly.length || looksOld()) {
