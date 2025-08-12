@@ -6,7 +6,7 @@ const nextConfig = {
       "pdf-parse",
       "formidable",
       "@napi-rs/canvas",
-      "@tesseract.js/worker"
+      "tesseract.js"
     ]
   }
 };
