@@ -6,7 +6,6 @@ import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
 import { parseHistoriaFromText } from "../../lib/parseHistoria.js";
-import { ocrHistoriaFromPdf } from "../../lib/ocrHistoria";
 
 export const config = {
   api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
