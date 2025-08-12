@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — Parser robusto para Historia (D&B) + PI CNBV
+// pages/api/analyzePdf.js — Parser robusto Historia (anclado a "Vigente") + PI CNBV
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
@@ -142,16 +142,7 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA — Estrategia 0: vertical tolerante ======================= */
-/**
- * En D&B, la sección "Historia:" viene a veces en 2 columnas y pdf-parse
- * separa dígitos por espacios. Aquí:
- * 1) Encontramos TODAS las líneas y su índice.
- * 2) Hallamos los índices de los meses (Ene 2023, etc.).
- * 3) Para cada mes, buscamos el primer "número grande" (en miles) que aparece DESPUÉS
- *    del mes (hasta 60 líneas adelante, por si es multicolumna).
- * 4) Reconstruimos tokens numéricos con espacios/nbsp y separadores.
- */
+/* ======================= HISTORIA — Estrategia 0: vertical (anclado a "Vigente") ======================= */
 function parseHistoriaVerticalMiles(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -160,27 +151,30 @@ function parseHistoriaVerticalMiles(fullText) {
   );
   if (!bloque) return [];
 
-  const lines = bloque.split(/\n/).map(s => s.trim()).filter(s => s.length);
+  const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
 
-  // Token numérico que permite dígitos con espacios/NBSP y separadores de miles/decimal
-  const NUM_TOKEN = /-?(?:\d[\s\u00A0.,]?){2,14}/g;
-  const toNumRobusto = (s) => {
+  // número con dígitos separados por espacios/NBSP y separadores
+  const NUM = "(-?(?:\\d[\\s\\u00A0.,]?){2,14})";
+  const NUM_TOKEN = new RegExp(NUM, "g");
+  const BEFORE_VIG = new RegExp(NUM + "\\s*Vigente\\b", "i");
+  const AFTER_VIG  = new RegExp("\\bVigente\\b\\s*" + NUM, "i");
+
+  const toNum = (s) => {
     if (!s) return NaN;
     const canon = String(s)
       .replace(/\u00A0/g, " ")
-      .replace(/\s+/g, "")             // quita espacios entre dígitos
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "") // separador de miles
-      .replace(/,/g, ".");             // coma decimal -> punto
+      .replace(/\s+/g, "")                              // quita espacios
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")     // miles
+      .replace(/,/g, ".");                              // decimal
     const n = Number(canon);
     if (!Number.isFinite(n)) return NaN;
     if (n < 0) return NaN;
-    // descartamos ruiditos: 0, 1, 91, etc.
-    if (String(Math.trunc(n)).length < 3) return NaN;
-    return Math.round(n * 1000);       // reporte en miles -> MXN
+    if (String(Math.trunc(n)).length < 3) return NaN;   // evita 0, 91, etc.
+    return Math.round(n * 1000);                        // miles -> MXN
   };
 
-  // Mapeo de meses y sus índices de línea
+  // indices de meses
   const months = [];
   const monthIdx = [];
   for (let i = 0; i < lines.length; i++) {
@@ -188,46 +182,50 @@ function parseHistoriaVerticalMiles(fullText) {
   }
   if (!months.length) return [];
 
-  // Pre-indexar todos los números con su índice de línea
-  const numericByLine = [];
-  for (let i = 0; i < lines.length; i++) {
-    const toks = lines[i].match(NUM_TOKEN) || [];
-    const vals = toks.map(toNumRobusto).filter(Number.isFinite);
-    if (vals.length) {
-      numericByLine.push({ i, vals });
-    }
-  }
+  const PESOS_MIN = 500_000;     // 0.5M
+  const PESOS_MAX = 70_000_000;  // 70M
 
-  const pickNextBigAfter = (startLine, stopLine) => {
-    // Primero en una ventana corta; si no, ampliar
-    const windows = [
-      { maxAhead: 12 },
-      { maxAhead: 30 },
-      { maxAhead: 60 },
-    ];
-    for (const w of windows) {
-      const lim = Math.min(lines.length - 1, startLine + w.maxAhead, stopLine);
-      const picked = [];
-      for (const row of numericByLine) {
-        if (row.i <= startLine || row.i > lim) continue;
-        for (const v of row.vals) {
-          // “grandes”: 1,000,000 a 25,000,000 MXN (aprox 1,000 a 25,000 miles)
-          if (v >= 1_000_000 && v <= 25_000_000) picked.push(v);
-        }
-      }
-      if (picked.length) return Math.max(...picked);
+  function pickVigenteForRange(start, end) {
+    // Ventana corta: primeras ~10 líneas tras el mes, para evitar “columna derecha”
+    const hardEnd = Math.min(end, start + 12, lines.length - 1);
+    const seg = lines.slice(start + 1, hardEnd + 1);
+
+    // 1) número inmediatamente antes de “Vigente”
+    const joined = seg.join(" ");
+    let m = joined.match(BEFORE_VIG);
+    if (m && m[1]) {
+      const v = toNum(m[1]);
+      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
     }
+    // 2) número inmediatamente después de “Vigente”
+    m = joined.match(AFTER_VIG);
+    if (m && m[1]) {
+      const v = toNum(m[1]);
+      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
+    }
+    // 3) fallback: primer número “grande” en ventana corta
+    const toks = joined.match(NUM_TOKEN) || [];
+    for (const t of toks) {
+      const v = toNum(t);
+      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
+    }
+    // 4) último recurso: ampliar un poco la ventana (hasta 30 líneas)
+    const softEnd = Math.min(end, start + 30, lines.length - 1);
+    const seg2 = lines.slice(start + 1, softEnd + 1).join(" ");
+    const toks2 = seg2.match(NUM_TOKEN) || [];
+    const vals = toks2.map(toNum).filter(v => Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX);
+    if (vals.length) return Math.max(...vals);
     return 0;
-  };
+  }
 
   const vigente = new Array(months.length).fill(0);
   for (let k = 0; k < months.length; k++) {
     const start = monthIdx[k];
     const end = k + 1 < months.length ? monthIdx[k + 1] : lines.length - 1;
-    vigente[k] = pickNextBigAfter(start, end);
+    vigente[k] = pickVigenteForRange(start, end);
   }
 
-  // Calificación (si viene cerca)
+  // Calificación (si viene cerca, capturamos tokens tipo 1A2/1C2, etc.)
   let ratings = new Array(months.length).fill(null);
   const calStart = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
   if (calStart !== -1) {
@@ -259,7 +257,6 @@ function parseHistoriaMensual(text) {
   const lines = bloqueHistoria.split(/\n/).map(s => s.trim()).filter(Boolean);
   const MONTH_TOKEN = /\b(?:Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/g;
 
-  // Busca la fila que agrupa varios meses (encabezado de rejilla)
   let headerIdx = -1;
   let months = [];
   for (let i = 0; i < lines.length; i++) {
@@ -270,7 +267,6 @@ function parseHistoriaMensual(text) {
   }
   if (headerIdx === -1 || months.length < 4) return [];
 
-  // Números robustos (acepta espacios entre dígitos)
   const NUM_TOKEN = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
   const toNum = (s) => {
     const canon = String(s)
@@ -513,7 +509,7 @@ export default async function handler(req, res) {
     // Totales
     const resumen = parseResumenActivosRobusto(text);
 
-    // Historia mensual: 0) vertical tolerante; 1) rejilla mejorada; 2) lib; 3) desde Activos
+    // Historia mensual (preferimos vertical anclada a "Vigente")
     let historyMonthly = parseHistoriaVerticalMiles(text);
     if (!historyMonthly || historyMonthly.every(r => !r.vigente)) {
       const h1 = parseHistoriaMensual(text);
@@ -528,7 +524,6 @@ export default async function handler(req, res) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
       if (h3 && h3.some(r => r.vigente)) historyMonthly = h3;
     }
-    // Garantiza últimos 12
     historyMonthly = Array.isArray(historyMonthly) ? historyMonthly.slice(-12) : [];
 
     // Flags
