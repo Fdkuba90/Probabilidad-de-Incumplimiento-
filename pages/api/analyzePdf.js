@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — Historia por mes (línea numérica pura) + PI CNBV
+// pages/api/analyzePdf.js — Historia anclada a bloque + PI CNBV
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
@@ -140,7 +140,27 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA — Estrategia 0: vertical (línea numérica pura) ======================= */
+/* ======================= HISTORIA — Meses canónicos desde el bloque ======================= */
+function extractHistoriaMonths(fullText) {
+  const bloque = sliceBetween(
+    fullText,
+    [/^\s*Historia\b:?/im, /Historia\s*:/i, /Hist[oó]rico/i],
+    [/^\s*INFORMACI[ÓO]N\s+COMERCIAL\b/im, /^\s*Califica\b/im, /^\s*DECLARATIVAS\b/im, /^\s*INFORMACI[ÓO]N\s+DE\s+PLD\b/im, /^\s*FIN DEL REPORTE\b/im]
+  );
+  if (!bloque) return [];
+
+  const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
+  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
+
+  const months = [];
+  for (const ln of lines) {
+    if (MES_RE.test(ln)) months.push(ln.replace(/\s+/g, " ").trim());
+  }
+  // últimos 12, preservando orden
+  return months.slice(-12);
+}
+
+/* ======================= HISTORIA — Estrategia 0: vertical (anclado a “Vigente”) ======================= */
 function parseHistoriaVerticalMiles(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -152,8 +172,11 @@ function parseHistoriaVerticalMiles(fullText) {
   const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
 
-  // “línea numérica pura” (sólo dígitos + separadores/espacios), sin texto
-  const NUM_LINE = /^\s*(?:-?(?:\d[\s\u00A0.,]?){1,14})\s*$/;
+  const NUM = "(-?(?:\\d[\\s\\u00A0.,]?){2,14})";
+  const NUM_TOKEN = new RegExp(NUM, "g");
+  const BEFORE_VIG = new RegExp(NUM + "\\s*Vigente\\b", "i");
+  const AFTER_VIG  = new RegExp("\\bVigente\\b\\s*" + NUM, "i");
+
   const toNum = (s) => {
     if (!s) return NaN;
     const canon = String(s)
@@ -163,56 +186,33 @@ function parseHistoriaVerticalMiles(fullText) {
       .replace(/,/g, ".");
     const n = Number(canon);
     if (!Number.isFinite(n)) return NaN;
-    // En Historia los valores están en miles (0–20,000 aprox). Evita ruiditos 0–99.
-    if (n < 0 || n < 100) return NaN;
+    if (n < 100) return NaN; // evitar ruidos pequeños
     return Math.round(n * 1000);
   };
 
-  // indices de meses dentro de Historia
   const months = [];
-  const monthIdx = [];
+  const idxs = [];
   for (let i = 0; i < lines.length; i++) {
-    if (MES_RE.test(lines[i])) { months.push(lines[i]); monthIdx.push(i); }
+    if (MES_RE.test(lines[i])) { months.push(lines[i]); idxs.push(i); }
   }
   if (!months.length) return [];
 
   const vigente = new Array(months.length).fill(0);
-
   for (let k = 0; k < months.length; k++) {
-    const start = monthIdx[k];
-    const next  = k + 1 < months.length ? monthIdx[k + 1] : lines.length;
-    // Buscamos la primera “línea numérica pura” entre el mes y el siguiente mes (ventana corta primero)
-    let found = 0;
-
-    // Ventana muy corta: 1..6 líneas después del mes
-    for (let i = start + 1; i < Math.min(next, start + 7); i++) {
-      if (NUM_LINE.test(lines[i])) {
-        const v = toNum(lines[i]);
-        if (Number.isFinite(v)) { found = v; break; }
-      }
+    const start = idxs[k];
+    const end = k + 1 < months.length ? idxs[k + 1] : lines.length - 1;
+    const joinedShort = lines.slice(start + 1, Math.min(end, start + 10)).join(" ");
+    let m = joinedShort.match(BEFORE_VIG);
+    if (m && m[1]) {
+      const v = toNum(m[1]); if (Number.isFinite(v)) { vigente[k] = v; continue; }
     }
-
-    // Si no se encontró, ampliamos hasta el siguiente mes, pero seguimos exigiendo línea numérica pura
-    if (!found) {
-      for (let i = start + 1; i < next; i++) {
-        if (NUM_LINE.test(lines[i])) {
-          const v = toNum(lines[i]);
-          if (Number.isFinite(v)) { found = v; break; }
-        }
-      }
+    m = joinedShort.match(AFTER_VIG);
+    if (m && m[1]) {
+      const v = toNum(m[1]); if (Number.isFinite(v)) { vigente[k] = v; continue; }
     }
-
-    vigente[k] = found || 0;
-  }
-
-  // Calificaciones tipo 1A2 / 1C2 si aparecen cerca (no críticas para el cálculo)
-  let ratings = new Array(months.length).fill(null);
-  const calIdx = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
-  if (calIdx !== -1) {
-    const raw = lines.slice(calIdx, Math.min(lines.length, calIdx + 80)).join(" ");
-    const toks = raw.match(/\b\d[A-Z]\d\b/gi) || [];
-    const slice = toks.slice(-months.length).map(t => t.toUpperCase());
-    for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
+    const toks = joinedShort.match(NUM_TOKEN) || [];
+    const vals = toks.map(toNum).filter(Number.isFinite);
+    vigente[k] = vals.length ? Math.max(...vals) : 0;
   }
 
   return months.slice(-12).map((month, i) => ({
@@ -222,7 +222,7 @@ function parseHistoriaVerticalMiles(fullText) {
     v30_59: 0,
     v60_89: 0,
     v90p: 0,
-    rating: ratings[i] || null
+    rating: null,
   }));
 }
 
@@ -319,7 +319,7 @@ function parseHistoriaMensual(text) {
   return out.slice(-12);
 }
 
-/* ======= HISTORIA — Estrategia 2: desde “Créditos Activos” ======= */
+/* ======= HISTORIA — Estrategia 2: desde “Créditos Activos” (sólo si NO hay Historia) ======= */
 function parseHistoriaMensualDesdeActivos(text) {
   const bloque = sliceBetween(
     text,
@@ -413,7 +413,7 @@ function puntuar(val, flags) {
   if (!isMissing(val[9])) { pts[9] = Number(val[9]) === 0 ? 54 : -19; }
   else { pts[9] = 0; flags.push({ id: 9, tipo: "sin_info" }); }
 
-  // 11 (regla explícita)
+  // 11
   if (val[11] === "--" || val[11] == null) pts[11] = 55;
   else pts[11] = Number(val[11]) === 0 ? 57 : 30;
 
@@ -421,7 +421,7 @@ function puntuar(val, flags) {
   if (!isMissing(val[14])) { pts[14] = Number(val[14]) === 0 ? 55 : -29; }
   else { pts[14] = 0; flags.push({ id: 14, tipo: "sin_info" }); }
 
-  // 15 (UDIS)
+  // 15
   const udis = Number(val._udis) || 0;
   pts[15] = udis >= 1_000_000 ? 112 : 52;
 
@@ -489,22 +489,54 @@ export default async function handler(req, res) {
     // Totales
     const resumen = parseResumenActivosRobusto(text);
 
-    // Historia mensual: 0) vertical (línea numérica pura) → 1) rejilla → 2) lib → 3) desde Activos
-    let historyMonthly = parseHistoriaVerticalMiles(text);
-    if (!historyMonthly || historyMonthly.every(r => !r.vigente)) {
-      const h1 = parseHistoriaMensual(text);
-      if (h1 && h1.some(r => r.vigente)) historyMonthly = h1;
-    }
-    if (!historyMonthly || historyMonthly.every(r => !r.vigente)) {
-      const h2 = parseHistoriaFromText(text);
-      const h2m = mapHistoriaFromLib(h2);
-      if (h2m && h2m.some(r => r.vigente)) historyMonthly = h2m;
-    }
-    if (!historyMonthly || historyMonthly.every(r => !r.vigente)) {
+    // 1) Meses canónicos desde HISTORIA (el “ground truth” de fechas)
+    const canonicalMonths = extractHistoriaMonths(text); // p.ej. ["Nov 2022", ..., "Oct 2023"]
+    const canonicalSet = new Set(canonicalMonths);
+
+    // 2) Historia mensual por estrategias
+    let histCandidates = [];
+
+    // 2.1 vertical
+    const h0 = parseHistoriaVerticalMiles(text);
+    if (h0 && h0.length) histCandidates.push(h0);
+
+    // 2.2 rejilla
+    const h1 = parseHistoriaMensual(text);
+    if (h1 && h1.length) histCandidates.push(h1);
+
+    // 2.3 librería
+    const h2 = mapHistoriaFromLib(parseHistoriaFromText(text));
+    if (h2 && h2.length) histCandidates.push(h2);
+
+    // 2.4 desde activos — SOLO si NO hay bloque Historia (sin meses canónicos)
+    if (!canonicalMonths.length) {
       const h3 = parseHistoriaMensualDesdeActivos(text);
-      if (h3 && h3.some(r => r.vigente)) historyMonthly = h3;
+      if (h3 && h3.length) histCandidates.push(h3);
     }
-    historyMonthly = Array.isArray(historyMonthly) ? historyMonthly.slice(-12) : [];
+
+    // 3) Elegir el mejor candidato y FILTRAR/ORDENAR por meses canónicos
+    let historyMonthly = [];
+    if (histCandidates.length) {
+      // Elige el que tenga más meses con “vigente” > 0
+      histCandidates.sort((a, b) => {
+        const ca = a.filter(r => (r.vigente||0) > 0).length;
+        const cb = b.filter(r => (r.vigente||0) > 0).length;
+        return cb - ca;
+      });
+      let best = histCandidates[0];
+
+      // Si tengo meses canónicos, filtro a ellos y reordeno
+      if (canonicalMonths.length) {
+        const mapBest = new Map(best.map(r => [r.month, r]));
+        historyMonthly = canonicalMonths.map(m => {
+          const hit = mapBest.get(m);
+          return hit ? hit : { month: m, vigente: 0, v1_29: 0, v30_59: 0, v60_89: 0, v90p: 0, rating: null };
+        });
+      } else {
+        // sin meses canónicos, uso “best” tal cual
+        historyMonthly = best.slice(-12);
+      }
+    }
 
     // Flags
     const flags = [];
