@@ -2,15 +2,9 @@
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
-import { createCanvas } from "canvas";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
-import Tesseract from "tesseract.js";
-import { parseCalificaFromText } from "../../lib/parseCalifica";
+import { parseCalificaFromText, parseHistoriaMensual, parseHistoriaFromOCR } from "../../lib/parseCalifica";
 
 export const config = { api: { bodyParser: false } };
-
-// Necesario en Node para pdfjs
-pdfjsLib.GlobalWorkerOptions.workerSrc = require("pdfjs-dist/legacy/build/pdf.worker.js");
 
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
@@ -49,7 +43,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ======================= HELPERS BASE ======================= */
+/* ======================= HELPERS ======================= */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) {
@@ -171,5 +165,94 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA MENSUAL (rejilla + fallback texto) ======================= */
-function parseHis
+/* ======================= HANDLER ======================= */
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+
+  try {
+    const form = formidable({ multiples: true });
+    const { files, fields } = await new Promise((resolve, reject) => {
+      form.parse(req, (err, flds, fls) => (err ? reject(err) : resolve({ fields: flds, files: fls })));
+    });
+
+    const pdfFile = files?.file?.[0] || files?.file;
+    if (!pdfFile?.filepath) return res.status(400).send("No se recibió archivo PDF");
+
+    const buffer = await readFile(pdfFile.filepath);
+    const parsed = await pdfParse(buffer);
+    const text = parsed?.text || "";
+
+    // Califica (IDs/valores/códigos)
+    const { indicadores, calificaRaw } = parseCalificaFromText(text);
+    const valores = {};
+    for (const it of indicadores) {
+      const raw = String(it.valor).trim();
+      valores[Number(it.id)] = raw === "--" ? "--" : Number(raw.replace(/,/g, ""));
+    }
+
+    // ID 15: pesos → UDIS (para puntaje)
+    const udi = Number(fields?.udi) || DEFAULT_UDI;
+    const pesosMax = Number(valores[15] || 0);
+    const udisMax  = pesosMax > 0 ? pesosMax / udi : 0;
+    valores._udis  = Math.round(udisMax);
+
+    // Puntaje y PI
+    const { pts, puntajeTotal } = puntuar(valores);
+    const pi = calcularPI(puntajeTotal);
+
+    // Totales
+    const {
+      totalOriginalPesos,
+      totalSaldoActualPesos,
+      totalVigentePesos,
+      totalVencidoPesos,
+    } = parseResumenActivosRobusto(text);
+
+    // Historia mensual (intento 1: texto del PDF)
+    let historyMonthly = parseHistoriaMensual(text);
+
+    // Fallback: si no hay historia y nos mandaron una imagen de esa sección, aplicamos OCR
+    if ((!historyMonthly || historyMonthly.length === 0) && (files?.historyImage || files?.historyimage)) {
+      const img = (files.historyImage?.[0] || files.historyImage || files.historyimage?.[0] || files.historyimage);
+      if (img?.filepath) {
+        try {
+          const imgBuf = await readFile(img.filepath);
+          const ocrOut = await parseHistoriaFromOCR(imgBuf); // devuelve mismo shape que parseHistoriaMensual
+          if (ocrOut?.length) historyMonthly = ocrOut;
+        } catch (err) {
+          console.warn("OCR fallback failed:", err);
+        }
+      }
+    }
+
+    // Códigos por ID
+    const codigos = {};
+    indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
+
+    // Empresa
+    const nombreEmpresa = extractEmpresa(text);
+
+    return res.status(200).json({
+      meta: { pages: parsed?.numpages || null },
+      empresa: nombreEmpresa,
+      calificaRaw,
+      indicadores,
+      codigos,
+      valores,
+      puntos: pts,
+      puntajeTotal,
+      probabilidadIncumplimiento: `${(pi * 100).toFixed(2)}%`,
+      summary: {
+        totalOriginalPesos,
+        totalSaldoActualPesos,
+        totalVigentePesos,
+        totalVencidoPesos,
+        maxCreditPesos: pesosMax,
+      },
+      historyMonthly, // ← si vino del PDF, genial; si no, se intentó por OCR
+    });
+  } catch (e) {
+    console.error("analyzePdf error:", e);
+    return res.status(500).json({ error: e?.message || "Error procesando el PDF" });
+  }
+}
