@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — Parser robusto Historia (anclado a "Vigente") + PI CNBV
+// pages/api/analyzePdf.js — Historia por mes (línea numérica pura) + PI CNBV
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
@@ -21,7 +21,6 @@ function normalizeText(text = "") {
     .replace(/\n{2,}/g, "\n")
     .trim();
 }
-
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) {
@@ -36,7 +35,6 @@ function sliceBetween(txt, fromReList, toReList) {
   }
   return rest;
 }
-
 function splitStuckToken(tok) {
   const s = String(tok);
   if (/^\d{7,10}$/.test(s)) {
@@ -142,7 +140,7 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA — Estrategia 0: vertical (anclado a "Vigente") ======================= */
+/* ======================= HISTORIA — Estrategia 0: vertical (línea numérica pura) ======================= */
 function parseHistoriaVerticalMiles(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -154,27 +152,23 @@ function parseHistoriaVerticalMiles(fullText) {
   const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
 
-  // número con dígitos separados por espacios/NBSP y separadores
-  const NUM = "(-?(?:\\d[\\s\\u00A0.,]?){2,14})";
-  const NUM_TOKEN = new RegExp(NUM, "g");
-  const BEFORE_VIG = new RegExp(NUM + "\\s*Vigente\\b", "i");
-  const AFTER_VIG  = new RegExp("\\bVigente\\b\\s*" + NUM, "i");
-
+  // “línea numérica pura” (sólo dígitos + separadores/espacios), sin texto
+  const NUM_LINE = /^\s*(?:-?(?:\d[\s\u00A0.,]?){1,14})\s*$/;
   const toNum = (s) => {
     if (!s) return NaN;
     const canon = String(s)
       .replace(/\u00A0/g, " ")
-      .replace(/\s+/g, "")                              // quita espacios
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")     // miles
-      .replace(/,/g, ".");                              // decimal
+      .replace(/\s+/g, "")
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")
+      .replace(/,/g, ".");
     const n = Number(canon);
     if (!Number.isFinite(n)) return NaN;
-    if (n < 0) return NaN;
-    if (String(Math.trunc(n)).length < 3) return NaN;   // evita 0, 91, etc.
-    return Math.round(n * 1000);                        // miles -> MXN
+    // En Historia los valores están en miles (0–20,000 aprox). Evita ruiditos 0–99.
+    if (n < 0 || n < 100) return NaN;
+    return Math.round(n * 1000);
   };
 
-  // indices de meses
+  // indices de meses dentro de Historia
   const months = [];
   const monthIdx = [];
   for (let i = 0; i < lines.length; i++) {
@@ -182,54 +176,40 @@ function parseHistoriaVerticalMiles(fullText) {
   }
   if (!months.length) return [];
 
-  const PESOS_MIN = 500_000;     // 0.5M
-  const PESOS_MAX = 70_000_000;  // 70M
-
-  function pickVigenteForRange(start, end) {
-    // Ventana corta: primeras ~10 líneas tras el mes, para evitar “columna derecha”
-    const hardEnd = Math.min(end, start + 12, lines.length - 1);
-    const seg = lines.slice(start + 1, hardEnd + 1);
-
-    // 1) número inmediatamente antes de “Vigente”
-    const joined = seg.join(" ");
-    let m = joined.match(BEFORE_VIG);
-    if (m && m[1]) {
-      const v = toNum(m[1]);
-      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
-    }
-    // 2) número inmediatamente después de “Vigente”
-    m = joined.match(AFTER_VIG);
-    if (m && m[1]) {
-      const v = toNum(m[1]);
-      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
-    }
-    // 3) fallback: primer número “grande” en ventana corta
-    const toks = joined.match(NUM_TOKEN) || [];
-    for (const t of toks) {
-      const v = toNum(t);
-      if (Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX) return v;
-    }
-    // 4) último recurso: ampliar un poco la ventana (hasta 30 líneas)
-    const softEnd = Math.min(end, start + 30, lines.length - 1);
-    const seg2 = lines.slice(start + 1, softEnd + 1).join(" ");
-    const toks2 = seg2.match(NUM_TOKEN) || [];
-    const vals = toks2.map(toNum).filter(v => Number.isFinite(v) && v >= PESOS_MIN && v <= PESOS_MAX);
-    if (vals.length) return Math.max(...vals);
-    return 0;
-  }
-
   const vigente = new Array(months.length).fill(0);
+
   for (let k = 0; k < months.length; k++) {
     const start = monthIdx[k];
-    const end = k + 1 < months.length ? monthIdx[k + 1] : lines.length - 1;
-    vigente[k] = pickVigenteForRange(start, end);
+    const next  = k + 1 < months.length ? monthIdx[k + 1] : lines.length;
+    // Buscamos la primera “línea numérica pura” entre el mes y el siguiente mes (ventana corta primero)
+    let found = 0;
+
+    // Ventana muy corta: 1..6 líneas después del mes
+    for (let i = start + 1; i < Math.min(next, start + 7); i++) {
+      if (NUM_LINE.test(lines[i])) {
+        const v = toNum(lines[i]);
+        if (Number.isFinite(v)) { found = v; break; }
+      }
+    }
+
+    // Si no se encontró, ampliamos hasta el siguiente mes, pero seguimos exigiendo línea numérica pura
+    if (!found) {
+      for (let i = start + 1; i < next; i++) {
+        if (NUM_LINE.test(lines[i])) {
+          const v = toNum(lines[i]);
+          if (Number.isFinite(v)) { found = v; break; }
+        }
+      }
+    }
+
+    vigente[k] = found || 0;
   }
 
-  // Calificación (si viene cerca, capturamos tokens tipo 1A2/1C2, etc.)
+  // Calificaciones tipo 1A2 / 1C2 si aparecen cerca (no críticas para el cálculo)
   let ratings = new Array(months.length).fill(null);
-  const calStart = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
-  if (calStart !== -1) {
-    const raw = lines.slice(calStart, Math.min(lines.length, calStart + 80)).join(" ");
+  const calIdx = lines.findIndex(l => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(l));
+  if (calIdx !== -1) {
+    const raw = lines.slice(calIdx, Math.min(lines.length, calIdx + 80)).join(" ");
     const toks = raw.match(/\b\d[A-Z]\d\b/gi) || [];
     const slice = toks.slice(-months.length).map(t => t.toUpperCase());
     for (let i = 0; i < slice.length; i++) ratings[i + (months.length - slice.length)] = slice[i];
@@ -509,7 +489,7 @@ export default async function handler(req, res) {
     // Totales
     const resumen = parseResumenActivosRobusto(text);
 
-    // Historia mensual (preferimos vertical anclada a "Vigente")
+    // Historia mensual: 0) vertical (línea numérica pura) → 1) rejilla → 2) lib → 3) desde Activos
     let historyMonthly = parseHistoriaVerticalMiles(text);
     if (!historyMonthly || historyMonthly.every(r => !r.vigente)) {
       const h1 = parseHistoriaMensual(text);
