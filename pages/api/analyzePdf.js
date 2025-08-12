@@ -8,7 +8,7 @@ export const config = { api: { bodyParser: false } };
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
-/* ---------------- Puntuación & PI ---------------- */
+/* ======================= PUNTUACIÓN & PI ======================= */
 function puntuar(val) {
   const pts = {};
   // 1
@@ -42,7 +42,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ---------------- Helpers bloque “Totales” ---------------- */
+/* ======================= HELPERS “TOTALES” ======================= */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) {
@@ -57,7 +57,6 @@ function sliceBetween(txt, fromReList, toReList) {
   }
   return rest;
 }
-
 function splitStuckToken(tok) {
   const s = String(tok);
   if (/^\d{7,10}$/.test(s)) {
@@ -66,7 +65,6 @@ function splitStuckToken(tok) {
   }
   return [s];
 }
-
 function pickNumbersNormalized(str) {
   const raw = (str.match(/\d{1,12}/g) || []);
   const flat = [];
@@ -76,7 +74,6 @@ function pickNumbersNormalized(str) {
     .map(x => parseInt(x, 10))
     .filter(n => Number.isFinite(n));
 }
-
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 function parseResumenActivosRobusto(text) {
@@ -141,7 +138,7 @@ function parseResumenActivosRobusto(text) {
   };
 }
 
-/* ---------------- Extraer Nombre/Razón Social (robusto) ---------------- */
+/* ======================= EMPRESA ======================= */
 function extractEmpresa(text) {
   let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
   if (m) {
@@ -168,23 +165,88 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ---------------- Historia mensual (Vigente & moras) ---------------- */
-const MES_RE = "(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\\s+20\\d{2}";
+/* ======================= HISTORIA MENSUAL (robusta) ======================= */
 function parseHistoriaMensual(text) {
-  // Cortamos la sección Historia → (siguiente sección típica)
+  const MONTH_RE = /(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}/gi;
+  const toPesosMilesSafe = (n) => (Number.isFinite(n) ? n * 1000 : 0);
+  const cleanNum = (s) => {
+    if (!s) return 0;
+    const m = String(s).replace(/[^\d\-]/g, "");
+    return m ? parseInt(m, 10) : 0;
+  };
+  const takeNums = (line) =>
+    (line.match(/-?\d[\d,\.]*/g) || []).map((t) => cleanNum(t));
+
+  // Cortamos la sección Historia si existe un ancla clara
   const bloque = sliceBetween(
     text,
     [/Historia:/i, /Historia\s*:/i],
-    [/(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(DECLARATIVAS)/i, /(INFORMACI[ÓO]N\s+DE PLD)/i]
+    [/(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(DECLARATIVAS)/i, /(INFORMACI[ÓO]N\s+DE PLD)/i]
   ) || text;
 
-  const lines = bloque.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const lines = bloque.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 
-  const isMonth = (s) => new RegExp(`^${MES_RE}$`, "i").test(s);
-  const normNum = (s) => {
-    const m = s.replace(/[^0-9\-]/g, "");
-    return m ? parseInt(m, 10) : 0;
-  };
+  /* ---------- MODO A: REJILLA (fila = categoría; columnas = meses) ---------- */
+  // Buscamos encabezado con varios meses en la misma línea
+  let headerIdx = -1;
+  let months = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ms = (lines[i].match(MONTH_RE) || []);
+    if (ms.length >= 4) {
+      headerIdx = i;
+      months = ms.map((m) => m.replace(/\s+/g, " ").trim());
+      break;
+    }
+  }
+
+  if (headerIdx !== -1 && months.length >= 4) {
+    // Ventana de cuerpo debajo del encabezado
+    const body = lines.slice(headerIdx + 1, headerIdx + 100);
+
+    // Regex tolerantes a variantes
+    const findRow = (res) => body.find((ln) => res.some((r) => r.test(ln))) || "";
+
+    const rowVig  = findRow([/^Vigente\b/i]);
+    const row129  = findRow([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
+    const row3059 = findRow([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
+    const row6089 = findRow([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
+    const row90p  = findRow([/^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
+
+    const numsV   = takeNums(rowVig);
+    const nums12  = takeNums(row129);
+    const nums35  = takeNums(row3059);
+    const nums68  = takeNums(row6089);
+    const nums90  = takeNums(row90p);
+
+    const align = (arr, n) => {
+      // Nos quedamos con los últimos n (lo más a la derecha suelen ser los meses del header)
+      const a = arr.slice(-n);
+      while (a.length < n) a.unshift(0);
+      return a;
+    };
+
+    const v  = align(numsV,  months.length);
+    const n12= align(nums12, months.length);
+    const n35= align(nums35, months.length);
+    const n68= align(nums68, months.length);
+    const n90= align(nums90, months.length);
+
+    // Calificación de cartera (si aparece en rejilla usualmente está por mes en otra tablita; aquí la omitimos)
+    const out = months.map((m, i) => ({
+      month: m,
+      vigente: toPesosMilesSafe(v[i]),
+      v1_29:   toPesosMilesSafe(n12[i]),
+      v30_59:  toPesosMilesSafe(n35[i]),
+      v60_89:  toPesosMilesSafe(n68[i]),
+      v90p:    toPesosMilesSafe(n90[i]),
+      rating: null
+    }));
+
+    return out.slice(-12);
+  }
+
+  /* ---------- MODO B: COLUMNA POR MES (fallback) ---------- */
+  const isMonth = (s) => new RegExp(`^${MONTH_RE.source}$`, "i").test(s);
 
   const result = [];
   for (let i = 0; i < lines.length; i++) {
@@ -192,36 +254,25 @@ function parseHistoriaMensual(text) {
     if (!isMonth(ln)) continue;
 
     const month = ln;
-    // Buscamos en las ~15 líneas siguientes los renglones de interés
-    const slice = lines.slice(i + 1, i + 16);
+    const slice = lines.slice(i + 1, i + 20);
 
-    // Expresiones tolerantes a variantes
-    const reVig = /^Vigente/i;
-    const re129 = /1-?29\s*d[ií]as/i;
-    const re3059 = /30-?59\s*d[ií]as/i;
-    const re6089 = /60-?89\s*d[ií]as/i;
-    const re90p = /(m[aá]s de 89\s*d[ií]as|90\+|>89)/i;
-    const reCar = /^Calificaci[oó]n\s+de\s+Cartera/i;
-
-    const takeVal = (re) => {
-      const row = slice.find(s => re.test(s));
+    const pickVal = (reList) => {
+      const row = slice.find((s) => reList.some((r) => r.test(s)));
       if (!row) return 0;
-      // Toma el último número de la línea (están en miles de pesos)
-      const nums = row.match(/-?\d[\d,\.]*/g);
-      const last = nums ? nums[nums.length - 1] : "0";
-      return toPesosMiles(normNum(last)); // → pesos
+      const nums = takeNums(row);
+      const last = nums.length ? nums[nums.length - 1] : 0;
+      return toPesosMilesSafe(last);
     };
 
-    const vigente  = takeVal(reVig);
-    const v1_29    = takeVal(re129);
-    const v30_59   = takeVal(re3059);
-    const v60_89   = takeVal(re6089);
-    const v90p     = takeVal(re90p);
+    const vigente  = pickVal([/^Vigente\b/i]);
+    const v1_29    = pickVal([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
+    const v30_59   = pickVal([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
+    const v60_89   = pickVal([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
+    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
 
     let rating = null;
-    const carLine = slice.find(s => reCar.test(s));
+    const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
     if (carLine) {
-      // ejemplo: "Calificación de Cartera   1EX7A" → extraemos token final
       const toks = carLine.split(/\s+/).filter(Boolean);
       rating = toks[toks.length - 1] || null;
     }
@@ -229,11 +280,10 @@ function parseHistoriaMensual(text) {
     result.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
   }
 
-  // Si hay más de 12, devolvemos los últimos 12 (lo más reciente suele venir al final)
   return result.slice(-12);
 }
 
-/* ---------------- Handler ---------------- */
+/* ======================= HANDLER ======================= */
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
@@ -268,7 +318,7 @@ export default async function handler(req, res) {
     const { pts, puntajeTotal } = puntuar(valores);
     const pi = calcularPI(puntajeTotal);
 
-    // Totales (Original/Saldo/Vigente/Vencido)
+    // Totales
     const {
       totalOriginalPesos,
       totalSaldoActualPesos,
@@ -276,14 +326,14 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual
+    // Historia mensual (ya multiplicada x 1000 adentro)
     const historyMonthly = parseHistoriaMensual(text);
 
     // Códigos por ID
     const codigos = {};
     indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
 
-    // Nombre de empresa
+    // Empresa
     const nombreEmpresa = extractEmpresa(text);
 
     return res.status(200).json({
@@ -303,7 +353,7 @@ export default async function handler(req, res) {
         totalVencidoPesos,
         maxCreditPesos: pesosMax,
       },
-      historyMonthly, // <-- NUEVO
+      historyMonthly,
     });
   } catch (e) {
     console.error("analyzePdf error:", e);
