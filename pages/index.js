@@ -111,7 +111,7 @@ export default function Home() {
             });
 
             return (
-              <section>
+              <section style={{ marginBottom: 24 }}>
                 <h4>Detalle de puntuación</h4>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
@@ -136,6 +136,39 @@ export default function Home() {
               </section>
             );
           })()}
+
+          {/* Historia mensual */}
+          {Array.isArray(data.historyMonthly) && data.historyMonthly.length > 0 && (
+            <section>
+              <h4>Historia por mes (pesos)</h4>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={th}>Mes</th>
+                    <th style={th}>Vigente</th>
+                    <th style={th}>1–29</th>
+                    <th style={th}>30–59</th>
+                    <th style={th}>60–89</th>
+                    <th style={th}>90+</th>
+                    <th style={th}>Calif. Cartera</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.historyMonthly.map((r, idx) => (
+                    <tr key={`${r.month}-${idx}`}>
+                      <td style={td}>{r.month}</td>
+                      <td style={td}>{fmtMXN(r.vigente)}</td>
+                      <td style={td}>{fmtMXN(r.v1_29)}</td>
+                      <td style={td}>{fmtMXN(r.v30_59)}</td>
+                      <td style={td}>{fmtMXN(r.v60_89)}</td>
+                      <td style={td}>{fmtMXN(r.v90p)}</td>
+                      <td style={td}>{r.rating || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
         </>
       )}
     </main>
