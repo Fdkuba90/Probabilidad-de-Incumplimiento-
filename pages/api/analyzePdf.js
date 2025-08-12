@@ -1,9 +1,16 @@
+// pages/api/analyzePdf.js
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
+import { createCanvas } from "canvas";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
+import Tesseract from "tesseract.js";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
 
 export const config = { api: { bodyParser: false } };
+
+// Necesario en Node para pdfjs
+pdfjsLib.GlobalWorkerOptions.workerSrc = require("pdfjs-dist/legacy/build/pdf.worker.js");
 
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
@@ -88,8 +95,7 @@ function parseResumenActivosRobusto(text) {
     /(Resumen\s+Cr[eé]ditos?\s+Liquidados?)/i,
     /(Historia)/i,
     /(INFORMACI[ÓO]N\s+COMERCIAL)/i,
-    /(DECLARATIVAS)/i,
-    /(FIN\s+DEL\s+REPORTE)/i
+    /(DECLARATIVAS)/i
   ];
 
   const bloque = sliceBetween(text, fromReList, toReList);
@@ -142,8 +148,28 @@ function parseResumenActivosRobusto(text) {
 
 /* ======================= EMPRESA ======================= */
 function extractEmpresa(text) {
-  // 1) mismo renglón
   let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
   if (m) {
     const cand = m[1].trim();
     if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
+  }
+  m = text.match(/([^\n\r]+?)\s*Nombre\/Raz[oó]n Social:/i);
+  if (m) {
+    const cand = m[1].trim();
+    if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
+  }
+  const idx = text.search(/Nombre\/Raz[oó]n Social:/i);
+  if (idx >= 0) {
+    const tail = text.slice(idx).split(/\r?\n/);
+    for (let i = 1; i < Math.min(tail.length, 5); i++) {
+      const cand = (tail[i] || "").trim();
+      if (!cand) continue;
+      if (/^(Direcci[oó]n|RFC|CURP|Datos Generales|Colonia|Del\.?\/Mun|Ciudad|C[óo]digo Postal|Estado|Pa[ií]s|Tel[eé]fono|Fax)/i.test(cand)) continue;
+      return cand;
+    }
+  }
+  return null;
+}
+
+/* ======================= HISTORIA MENSUAL (rejilla + fallback texto) ======================= */
+function parseHis
