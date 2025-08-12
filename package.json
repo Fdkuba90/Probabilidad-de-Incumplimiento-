@@ -14,9 +14,10 @@
     "react-dom": "18.3.1",
     "pdfjs-dist": "^4.3.136",
     "@napi-rs/canvas": "^0.1.53",
-    "@tesseract.js/worker": "^4.0.3"
+    "tesseract.js": "^5.0.0"
   },
   "engines": {
     "node": ">=18"
   }
 }
+
