@@ -200,7 +200,7 @@ function parseHistoriaMensual(text) {
       { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
       { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
       { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
-      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
+      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s*89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
       { key: "rating",   re: /^Calificaci[oó]n\s+de\s+Cartera\b/i,      numeric: false }
     ];
 
@@ -291,9 +291,9 @@ function parseHistoriaMensual(text) {
   return result.slice(-12);
 }
 
-/* ======= NUEVO: HISTORIA MENSUAL desde “Créditos Activos” (cuando no hay rejilla) ======= */
+/* ======= NUEVO: HISTORIA desde “Créditos Activos” (cuando no hay rejilla) ======= */
+// (Esta función queda disponible si quieres usarla en el futuro)
 function parseHistoriaMensualDesdeActivos(text) {
-  // bloque entre "Créditos Activos" y "Resumen Créditos Activos" / "Créditos Liquidados"
   const bloque = sliceBetween(
     text,
     [/Cr[eé]ditos?\s+Activos?:/i, /INFORMACI[ÓO]N\s+CREDITICIA/i],
@@ -302,7 +302,6 @@ function parseHistoriaMensualDesdeActivos(text) {
 
   if (!bloque) return [];
 
-  // Coincidencias del patrón: MM-AAAA + 9 números (plazo, original, vigente, 1-29, 30-59, 60-89, 90-119, 180+, 120-179)
   const re = /([01]\d-\d{4})\s+(\d{1,6})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})/g;
   const agg = new Map();
 
@@ -313,7 +312,7 @@ function parseHistoriaMensualDesdeActivos(text) {
       "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic"
     }[mm] || mm;
     return `${M} ${yyyy}`;
-    };
+  };
 
   let m;
   while ((m = re.exec(bloque)) !== null) {
@@ -323,8 +322,6 @@ function parseHistoriaMensualDesdeActivos(text) {
     const v1_29    = Number(m[5]) || 0;
     const v30_59   = Number(m[6]) || 0;
     const v60_89   = Number(m[7]) || 0;
-    // “90+” = (90–119) + (120–179) + (180+). En el PDF los dos últimos pueden ir en cualquier orden,
-    // por eso sumamos los tres últimos campos pase lo que pase.
     const v90p     = (Number(m[8]) || 0) + (Number(m[9]) || 0) + (Number(m[10]) || 0);
 
     const cur = agg.get(monthTok) || { month: monthTok, vigente:0, v1_29:0, v30_59:0, v60_89:0, v90p:0, rating: null };
@@ -336,7 +333,6 @@ function parseHistoriaMensualDesdeActivos(text) {
     agg.set(monthTok, cur);
   }
 
-  // ordenar por fecha y regresar últimos 12
   const order = Array.from(agg.values()).sort((a, b) => {
     const [ma, ya] = a.month.split(" "); const [mb, yb] = b.month.split(" ");
     const ix = (m) => "Ene Feb Mar Abr May Jun Jul Ago Sep Oct Nov Dic".split(" ").indexOf(m);
@@ -344,6 +340,25 @@ function parseHistoriaMensualDesdeActivos(text) {
   });
 
   return order.slice(-12);
+}
+
+/* ======================= FIX: Mapear parseHistoriaFromText al mismo formato ======================= */
+function coerceNum(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v : 0;
+}
+function mapHistoriaFromLib(hObj) {
+  // hObj viene de parseHistoriaFromText: { historiaRaw, meses, filas }
+  if (!hObj || !Array.isArray(hObj.filas)) return [];
+  return hObj.filas.slice(-12).map(r => ({
+    month: r.mes || null,
+    vigente:  coerceNum(r.vigente),
+    v1_29:    coerceNum(r.d1_29),
+    v30_59:   coerceNum(r.d30_59),
+    v60_89:   coerceNum(r.d60_89),
+    v90p:     coerceNum(r.d90_plus),
+    rating:   r.calificacion || null,
+  }));
 }
 
 /* ======================= HANDLER ======================= */
@@ -389,10 +404,11 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual — primero intentamos la rejilla; si no existe, calculamos desde “Créditos Activos”
+    // Historia mensual — primero intentamos la rejilla; si no existe, usamos parseHistoriaFromText y mapeamos al mismo formato
     let historyMonthly = parseHistoriaMensual(text);
     if (!historyMonthly || historyMonthly.length === 0) {
-      historyMonthly = parseHistoriaFromText(text);
+      const h2 = parseHistoriaFromText(text); // { historiaRaw, meses, filas }
+      historyMonthly = mapHistoriaFromLib(h2); // <-- ahora siempre es un arreglo [{month, ...}]
     }
 
     // Códigos por ID
