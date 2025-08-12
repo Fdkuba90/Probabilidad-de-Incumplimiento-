@@ -520,30 +520,30 @@ const looksRaro = () => {
       if (h3 && h3.length) historyMonthly = h3;
     }
 
-    // Si seguimos vacíos o claramente viejos, probar OCR (IMPORT DINÁMICO)
-    let usedOCR = false;
-    const looksOld = () => {
-      if (!historyMonthly?.length) return true;
-      const years = historyMonthly
-        .map(r => parseMonthToken(r.month)?.y)
-        .filter(Number.isFinite);
-      if (!years.length) return true;
-      const maxY = Math.max(...years);
-      return years.some(y => maxY - y >= 3);
-    };
+   // Si seguimos vacíos, luce raro, o claramente viejo, probar OCR y priorizarlo
+let usedOCR = false;
+const looksOld = () => {
+  const hm = historyMonthly || [];
+  if (!hm.length) return true;
+  const years = hm.map(r => parseMonthToken(r.month)?.y).filter(Number.isFinite);
+  if (!years.length) return true;
+  const maxY = Math.max(...years);
+  return years.some(y => maxY - y >= 3);
+};
 
-    if (!historyMonthly.length || looksOld()) {
-      try {
-        const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
-        const ocrRows = await ocrHistoriaFromPdf(buffer);
-        if (ocrRows && ocrRows.length) {
-          historyMonthly = ocrRows;
-          usedOCR = true;
-        }
-      } catch (e) {
-        console.error("OCR Historia falló:", e);
-      }
+if (!historyMonthly.length || looksOld() || (canonicalMonths.length && looksRaro())) {
+  try {
+    const { ocrHistoriaFromPdf } = await import("../../lib/ocrHistoria.js");
+    const ocrRows = await ocrHistoriaFromPdf(buffer);
+    if (ocrRows && ocrRows.length) {
+      historyMonthly = ocrRows;        // priorizamos OCR si trae datos
+      usedOCR = true;
     }
+  } catch (e) {
+    console.error("OCR Historia falló:", e);
+  }
+}
+
 
     // Orden cronológico y últimos 12
     if (Array.isArray(historyMonthly)) {
