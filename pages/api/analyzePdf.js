@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — Historia canónica (sin caer a “desde activos” si hay Historia) + PI
+// pages/api/analyzePdf.js — Historia por mes (tabla precisa, últimos 12) + normalizador Califica + PI
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
@@ -12,7 +12,7 @@ export const config = {
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
-/* ======================= Utils ======================= */
+/* ======================= Helpers generales ======================= */
 function normalizeText(text = "") {
   return (text || "")
     .replace(/\u00A0/g, " ")
@@ -37,7 +37,7 @@ function sliceBetween(txt, fromReList, toReList) {
 }
 function splitStuckToken(tok) {
   const s = String(tok);
-  if (/^\d{7,10}$/.test(s)) {
+  if (/^\d{7,10}$/.test(s)) { // 1234567890 -> 123456 7890
     const a = s.slice(0, -4), b = s.slice(-4);
     if (/^\d+$/.test(a) && /^\d+$/.test(b)) return [a, b];
   }
@@ -53,6 +53,39 @@ function pickNumbersNormalized(str) {
     .filter(n => Number.isFinite(n));
 }
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
+
+/* ======================= Normalizador numérico Califica ======================= */
+function parseNumLoose(v) {
+  if (v == null) return null;
+  let s = String(v).trim().replace(/\u00A0/g, " ").replace(/\s+/g, "");
+  if (s === "" || s === "--") return null;
+  // coma decimal sin punto -> úsala como decimal
+  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
+  // separadores de miles residuales: "8.205" (punto como miles) o espacios
+  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, "");
+  // comas de miles residuales
+  s = s.replace(/,(?=\d{3}(?:\D|$))/g, "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+const clamp01 = (x) => x == null ? null : Math.max(0, Math.min(1, x));
+
+/* ======================= Orden de meses ======================= */
+const MES_IDX = { Ene:0, Feb:1, Mar:2, Abr:3, May:4, Jun:5, Jul:6, Ago:7, Sep:8, Oct:9, Nov:10, Dic:11 };
+function parseMonthToken(tok) {
+  // "Nov 2023" -> {y:2023, m:10}
+  const m = tok && tok.match(/^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+(\d{4})$/i);
+  if (!m) return null;
+  const mm = MES_IDX[m[1].slice(0,3).charAt(0).toUpperCase()+m[1].slice(1,3).toLowerCase()] ?? MES_IDX[m[1].slice(0,3)];
+  const yy = Number(m[2]);
+  if (!Number.isFinite(mm) || !Number.isFinite(yy)) return null;
+  return { y: yy, m: mm };
+}
+function compareMonthTok(a, b) {
+  const pa = parseMonthToken(a), pb = parseMonthToken(b);
+  if (!pa || !pb) return 0;
+  return pa.y === pb.y ? (pa.m - pb.m) : (pa.y - pb.y);
+}
 
 /* ======================= Resumen Créditos Activos ======================= */
 function parseResumenActivosRobusto(text) {
@@ -137,7 +170,7 @@ function extractEmpresa(text) {
   return null;
 }
 
-/* ======================= HISTORIA — meses canónicos desde el bloque ======================= */
+/* ======================= HISTORIA — extraer meses canónicos ======================= */
 function extractHistoriaMonths(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -145,27 +178,22 @@ function extractHistoriaMonths(fullText) {
     [/^\s*INFORMACI[ÓO]N\s+COMERCIAL\b/im, /^\s*Califica\b/im, /^\s*DECLARATIVAS\b/im, /^\s*INFORMACI[ÓO]N\s+DE\s+PLD\b/im, /^\s*FIN DEL REPORTE\b/im]
   );
   if (!bloque) return [];
-
   const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
-  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
-
+  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
   const months = [];
-  for (const ln of lines) {
-    if (MES_RE.test(ln)) {
-      const tok = ln.replace(/\s+/g, " ").trim();
-      if (!months.includes(tok)) months.push(tok);
-    }
-  }
+  for (const ln of lines) if (MES_RE.test(ln)) months.push(ln.replace(/\s+/g, " ").trim());
+  // Orden real y últimos 12
+  months.sort(compareMonthTok);
   return months.slice(-12);
 }
-function alignToCanonical(canonicalMonths, items) {
-  if (!Array.isArray(canonicalMonths) || canonicalMonths.length === 0) return items.slice(-12);
-  const map = new Map((items || []).map(r => [r.month, r]));
-  return canonicalMonths.map(m => map.get(m) || { month: m, vigente: 0, v1_29: 0, v30_59: 0, v60_89: 0, v90p: 0, rating: null });
-}
 
-/* ======================= HISTORIA — lector “vertical” (número cerca de Vigente) ======================= */
-function parseHistoriaVerticalMiles(fullText) {
+/* ======================= HISTORIA — lector de tabla preciso ======================= */
+/**
+ * Lee “Historia por mes (pesos)”:
+ *  Mes → Vigente → 1–29 → 30–59 → 60–89 → 90+ → Calificación
+ * Tolerante a dígitos con espacios y coma/punto.
+ */
+function parseHistoriaTablaPrecisa(fullText) {
   const bloque = sliceBetween(
     fullText,
     [/^\s*Historia\s+por\s+mes\s*\(pesos\)\b/im, /^\s*Historia\b:?/im],
@@ -174,62 +202,56 @@ function parseHistoriaVerticalMiles(fullText) {
   if (!bloque) return [];
 
   const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
-  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/i;
-
-  const NUM = "(-?(?:\\d[\\s\\u00A0.,]?){2,14})";
-  const BEFORE_VIG = new RegExp(NUM + "\\s*Vigente\\b", "i");
-  const AFTER_VIG  = new RegExp("\\bVigente\\b\\s*" + NUM, "i");
-  const NUM_TOKEN  = new RegExp(NUM, "g");
-
-  const toNum = (s) => {
+  const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
+  const NUM_RE = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
+  const toNumMiles = (s) => {
     const canon = String(s)
       .replace(/\u00A0/g, " ")
       .replace(/\s+/g, "")
       .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")
       .replace(/,/g, ".");
     const n = Number(canon);
-    return Number.isFinite(n) && n >= 0 ? Math.round(n * 1000) : NaN;
+    return Number.isFinite(n) ? Math.round(n * 1000) : NaN; // están en miles
   };
 
-  const months = [];
-  const idxs = [];
+  // Localiza todas las filas por mes
+  const rows = [];
   for (let i = 0; i < lines.length; i++) {
-    if (MES_RE.test(lines[i])) { months.push(lines[i]); idxs.push(i); }
-  }
-  if (!months.length) return [];
+    if (!MES_RE.test(lines[i])) continue;
+    const month = lines[i].replace(/\s+/g, " ").trim();
+    const seg = lines.slice(i + 1, Math.min(lines.length, i + 25)); // ventana razonable hasta próxima fila
+    const joined = seg.join(" ");
 
-  const vigente = new Array(months.length).fill(0);
+    // intenta capturar “número ± Vigente”
+    const BEFORE_VIG = /(-?(?:\d[\s\u00A0.,]?){1,14})\s*Vigente\b/i;
+    const AFTER_VIG  = /\bVigente\b\s*(-?(?:\d[\s\u00A0.,]?){1,14})/i;
 
-  for (let k = 0; k < months.length; k++) {
-    const start = idxs[k];
-    const end = k + 1 < months.length ? idxs[k + 1] : lines.length;
+    let vigente = 0, v1_29 = 0, v30_59 = 0, v60_89 = 0, v90p = 0, rating = null;
 
-    const short = lines.slice(start + 1, Math.min(end, start + 12)).join(" ");
-    let m = short.match(BEFORE_VIG);
+    // Vigente
+    let m = joined.match(BEFORE_VIG);
     if (m && m[1]) {
-      const v = toNum(m[1]); if (Number.isFinite(v)) { vigente[k] = v; continue; }
+      const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v;
     }
-    m = short.match(AFTER_VIG);
-    if (m && m[1]) {
-      const v = toNum(m[1]); if (Number.isFinite(v)) { vigente[k] = v; continue; }
+    if (!vigente) {
+      m = joined.match(AFTER_VIG);
+      if (m && m[1]) {
+        const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v;
+      }
+    }
+    // fallback: mayor número razonable dentro de la ventana corta
+    if (!vigente) {
+      const toks = (joined.match(NUM_RE) || []).map(toNumMiles).filter(n => Number.isFinite(n) && n > 0 && n <= 100_000_000);
+      if (toks.length) vigente = Math.max(...toks);
     }
 
-    // Fallback: buscar en todo el segmento hasta el siguiente mes
-    const joined = lines.slice(start + 1, end).join(" ");
-    const toks = joined.match(NUM_TOKEN) || [];
-    const vals = toks.map(toNum).filter(x => Number.isFinite(x) && x >= 100_000 && x <= 70_000_000); // 100k–70M
-    vigente[k] = vals.length ? Math.max(...vals) : 0;
+    // (Opcional) podríamos detectar vencidos 1-29, 30-59, 60-89, 90+, pero en este PDF suelen ser 0.
+    rows.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
   }
 
-  return months.slice(-12).map((month, i) => ({
-    month,
-    vigente: vigente[i] || 0,
-    v1_29: 0,
-    v30_59: 0,
-    v60_89: 0,
-    v90p: 0,
-    rating: null
-  }));
+  // Ordena cronológicamente y devuelve últimos 12
+  rows.sort((a, b) => compareMonthTok(a.month, b.month));
+  return rows.slice(-12);
 }
 
 /* ======================= HISTORIA — rejilla (fallback) ======================= */
@@ -254,7 +276,7 @@ function parseHistoriaMensual(text) {
   if (headerIdx === -1 || months.length < 4) return [];
 
   const NUM_TOKEN = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
-  const toNum = (s) => {
+  const toNumMiles = (s) => {
     const canon = String(s)
       .replace(/\u00A0/g, " ")
       .replace(/\s+/g, "")
@@ -290,7 +312,7 @@ function parseHistoriaMensual(text) {
       if (nextRes.some(r => r.test(ln))) break;
       if (ROWS[rowIndex].numeric) {
         const toks = ln.match(NUM_TOKEN) || [];
-        accNums.push(...toks.map(toNum).filter(Number.isFinite));
+        accNums.push(...toks.map(toNumMiles).filter(Number.isFinite));
       } else {
         const toks = ln.match(/\b\d[A-Z]\d\b/gi) || [];
         accToks.push(...toks.map(t => t.toUpperCase()));
@@ -322,6 +344,7 @@ function parseHistoriaMensual(text) {
     rating:  rowsData.rating?.[idx]  ?? null
   }));
 
+  out.sort((a, b) => compareMonthTok(a.month, b.month));
   return out.slice(-12);
 }
 
@@ -360,12 +383,7 @@ function parseHistoriaMensualDesdeActivos(text) {
     agg.set(monthTok, cur);
   }
 
-  const order = Array.from(agg.values()).sort((a, b) => {
-    const [ma, ya] = a.month.split(" "); const [mb, yb] = b.month.split(" ");
-    const ix = (m) => "Ene Feb Mar Abr May Jun Jul Ago Sep Oct Nov Dic".split(" ").indexOf(m);
-    return ya === yb ? ix(ma) - ix(mb) : Number(ya) - Number(yb);
-  });
-
+  const order = Array.from(agg.values()).sort((a, b) => compareMonthTok(a.month, b.month));
   return order.slice(-12);
 }
 
@@ -406,11 +424,11 @@ function puntuar(val, flags) {
   const pts = {};
   const isMissing = (v) => v == null || v === "--" || (typeof v === "number" && !Number.isFinite(v));
 
-  if (!isMissing(val[1])) pts[1] = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16; else { pts[1] = 0; flags.push({ id:1, tipo:"sin_info" }); }
+  if (!isMissing(val[1]))  pts[1]  = val[1] === 0 ? 62 : val[1] <= 3 ? 50 : val[1] <= 7 ? 41 : 16; else { pts[1]=0; flags.push({id:1,tipo:"sin_info"}); }
   if (val[6] === "--" || val[6] == null) pts[6] = 52; else pts[6] = val[6] >= 0.93 ? 71 : val[6] >= 0.81 ? 54 : 17;
-  if (!isMissing(val[9])) pts[9] = Number(val[9]) === 0 ? 54 : -19; else { pts[9] = 0; flags.push({ id:9, tipo:"sin_info" }); }
+  if (!isMissing(val[9]))  pts[9]  = Number(val[9]) === 0 ? 54 : -19; else { pts[9]=0; flags.push({id:9,tipo:"sin_info"}); }
   if (val[11] === "--" || val[11] == null) pts[11] = 55; else pts[11] = Number(val[11]) === 0 ? 57 : 30;
-  if (!isMissing(val[14])) pts[14] = Number(val[14]) === 0 ? 55 : -29; else { pts[14] = 0; flags.push({ id:14, tipo:"sin_info" }); }
+  if (!isMissing(val[14])) pts[14] = Number(val[14]) === 0 ? 55 : -29; else { pts[14]=0; flags.push({id:14,tipo:"sin_info"}); }
   const udis = Number(val._udis) || 0; pts[15] = udis >= 1_000_000 ? 112 : 52;
   const m = Number(val[16]); pts[16] = Number.isFinite(m) ? (m < 24 ? 41 : m < 36 ? 51 : m < 48 ? 60 : m < 98 ? 60 : m < 120 ? 61 : 67) : (flags.push({id:16,tipo:"sin_info"}), 0);
   const mLast = Number(val[17]); pts[17] = Number.isFinite(mLast) ? (mLast > 0 && mLast <= 6 ? 46 : 58) : (flags.push({id:17,tipo:"sin_info"}), 0);
@@ -450,59 +468,67 @@ export default async function handler(req, res) {
     });
     const text = normalizeText(parsed?.text || "");
 
-    // Califica
+    /* ---- Califica ---- */
     const { indicadores = [], calificaRaw = null } = parseCalificaFromText(text) || {};
     const valores = {};
     for (const it of indicadores) {
-      const raw = String(it.valor ?? "").trim();
-      valores[Number(it.id)] = (raw === "--" || raw === "") ? "--" : Number(String(raw).replace(/,/g, ""));
+      const id = Number(it.id);
+      const n = parseNumLoose(it.valor);
+      valores[id] = (n == null) ? "--" : n;
     }
+    // clamp ratios a [0,1]
+    const ratioIds = [5,6,7,8,9,10,11,12];
+    for (const id of ratioIds) if (valores[id] !== "--") valores[id] = clamp01(valores[id]);
+    // guardas meses
+    if (valores[16] === "--") valores[16] = null;
+    if (valores[17] === "--") valores[17] = null;
 
-    // UDIS
+    // ID 15 -> UDIS
     const udi = Number(fields?.udi) || DEFAULT_UDI;
     const pesosMax = Number(valores[15] || 0);
     const udisMax  = pesosMax > 0 ? pesosMax / udi : 0;
     valores._udis  = Math.round(udisMax);
 
-    // Totales
+    /* ---- Totales ---- */
     const resumen = parseResumenActivosRobusto(text);
 
-    // Meses canónicos de HISTORIA
-    const canonicalMonths = extractHistoriaMonths(text);
-
-    // Historia mensual (prioridad: vertical → rejilla → lib). Si hay meses canónicos, NO usamos “desde activos”.
-    let historyMonthly = [];
-
-    const h0 = parseHistoriaVerticalMiles(text);
-    if (h0 && h0.length) historyMonthly = h0;
+    /* ---- Historia: primero la tabla precisa ---- */
+    const canonicalMonths = extractHistoriaMonths(text); // si existen, es que hay Historia real
+    let historyMonthly = parseHistoriaTablaPrecisa(text);
 
     if ((!historyMonthly.length || historyMonthly.every(r => !r.vigente)) ) {
       const h1 = parseHistoriaMensual(text);
       if (h1 && h1.length) historyMonthly = h1;
     }
-
     if ((!historyMonthly.length || historyMonthly.every(r => !r.vigente)) ) {
       const h2 = mapHistoriaFromLib(parseHistoriaFromText(text));
       if (h2 && h2.length) historyMonthly = h2;
     }
 
-    // Alinea a meses canónicos si existen
-    if (canonicalMonths.length) {
-      historyMonthly = alignToCanonical(canonicalMonths, historyMonthly || []);
-      // Si sigue vacío, al menos regresa los meses correctos en 0
-      if (!historyMonthly.length) {
-        historyMonthly = canonicalMonths.map(m => ({ month: m, vigente: 0, v1_29: 0, v30_59: 0, v60_89: 0, v90p: 0, rating: null }));
-      }
-    } else {
-      // SOLO si NO hay Historia en el PDF, permitir “desde activos”
-      if (!historyMonthly.length || historyMonthly.every(r => !r.vigente)) {
-        const h3 = parseHistoriaMensualDesdeActivos(text);
-        if (h3 && h3.length) historyMonthly = h3.slice(-12);
-      }
+    // Si hay Historia en el PDF (meses canónicos), no usamos "desde activos"
+    if (!canonicalMonths.length && (!historyMonthly.length || historyMonthly.every(r => !r.vigente))) {
+      const h3 = parseHistoriaMensualDesdeActivos(text);
+      if (h3 && h3.length) historyMonthly = h3;
     }
 
-    // Puntaje y PI
+    // Orden cronológico y últimos 12 (independiente del año, funciona en 2025+)
+    if (Array.isArray(historyMonthly)) {
+      historyMonthly.sort((a, b) => compareMonthTok(a.month, b.month));
+      historyMonthly = historyMonthly.slice(-12);
+    } else {
+      historyMonthly = [];
+    }
+
+    /* ---- Flags de consistencia (opcionales) ---- */
     const flags = [];
+    // max credit vs ID 15
+    if (Number.isFinite(pesosMax) && resumen.totalSaldoActualPesos != null) {
+      const diff = Math.abs(pesosMax - resumen.totalSaldoActualPesos);
+      const big = Math.max(1, resumen.totalSaldoActualPesos);
+      if (diff > 10 * big) flags.push({ tipo: "max_credit_inconsistente", detalle: "ID15 difiere varias órdenes de magnitud vs saldo actual" });
+    }
+
+    /* ---- Puntaje y PI ---- */
     const { pts, sumaIndicadores } = puntuar(valores, flags);
     const sinHistorial = detectaSinHistorial({ valores, historyMonthly, resumen });
     const baseAplicada = sinHistorial ? 0 : PUNTOS_BASE;
@@ -511,11 +537,11 @@ export default async function handler(req, res) {
     const puntajeTotal = baseAplicada + sumaIndicadores;
     const pi = calcularPI(puntajeTotal);
 
-    // Códigos por ID
+    /* ---- Códigos ---- */
     const codigos = {};
     indicadores.forEach((x) => (codigos[Number(x.id)] = x.codigo));
 
-    // Empresa
+    /* ---- Empresa ---- */
     const nombreEmpresa = extractEmpresa(text);
 
     return res.status(200).json({
