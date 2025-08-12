@@ -1,3 +1,4 @@
+// pages/index.js
 import { useState } from "react";
 
 export default function Home() {
@@ -22,7 +23,7 @@ export default function Home() {
       const res = await fetch("/api/analyzePdf", { method: "POST", body: fd });
       const json = await res.json();
 
-      // Mostramos también un resumen por si todo viene en cero
+      // Mostrar el panel debug automáticamente si la historia viene toda en ceros
       const hm = Array.isArray(json?.historyMonthly) ? json.historyMonthly : [];
       const allZero = hm.length > 0 && hm.every(r =>
         (r.vigente ?? 0) === 0 && (r.v1_29 ?? 0) === 0 &&
@@ -69,6 +70,35 @@ export default function Home() {
       ? n.toLocaleString("es-MX", { style: "currency", currency: "MXN" })
       : "-";
 
+  const FlagsPanel = ({ flags }) => {
+    const list = Array.isArray(flags) ? flags : [];
+    return (
+      <section style={{ margin: "16px 0" }}>
+        <h4 style={{ margin: "8px 0" }}>⚑ Flags (advertencias y notas)</h4>
+        {list.length === 0 ? (
+          <div style={{
+            padding: 12, borderRadius: 8, background: "#f6ffed",
+            border: "1px solid #b7eb8f", color: "#135200"
+          }}>
+            Sin flags.
+          </div>
+        ) : (
+          <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 8 }}>
+            {list.map((f, i) => (
+              <li key={i} style={{
+                padding: 12, borderRadius: 8, background: "#fffbe6",
+                border: "1px solid #ffe58f", color: "#614700"
+              }}>
+                <div><strong>Tipo:</strong> {f.tipo || "-"}</div>
+                {f.detalle && <div><strong>Detalle:</strong> {f.detalle}</div>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    );
+  };
+
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
       <header style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 16 }}>
@@ -79,13 +109,13 @@ export default function Home() {
       <form onSubmit={submit} style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
         <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         <label>UDI:&nbsp;<input value={udi} onChange={(e) => setUdi(e.target.value)} style={{ width: 100 }} /></label>
-        <button type="submit">Analizar PDF</button>
+        <button type="submit" disabled={busy}>{busy ? "Procesando…" : "Analizar PDF"}</button>
       </form>
 
       {busy && <p>Procesando PDF…</p>}
       {err && <p style={{ color: "crimson" }}>{err}</p>}
 
-      {/* Panel DEBUG visible sin DevTools */}
+      {/* Botón de debug y panel crudo */}
       {data && (
         <div style={{ margin: "12px 0" }}>
           <button
@@ -102,6 +132,7 @@ export default function Home() {
   empresa: data?.empresa,
   puntajeTotal: data?.puntajeTotal,
   summary: data?.summary,
+  flags: data?.flags || [],
   historyMonthly: data?.historyMonthly
 }, null, 2)}
               </pre>
@@ -112,7 +143,10 @@ export default function Home() {
 
       {data && (
         <>
-          {/* Panel vertical */}
+          {/* Panel de flags SIEMPRE visible */}
+          <FlagsPanel flags={data?.flags} />
+
+          {/* Panel vertical de resumen */}
           <section style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {data?.empresa && (
@@ -130,7 +164,7 @@ export default function Home() {
             </div>
           </section>
 
-          {/* Tabla por ID */}
+          {/* Tabla por ID (códigos y puntajes) */}
           {(() => {
             const codeById = {};
             (data.indicadores || []).forEach((it) => { codeById[Number(it.id)] = it.codigo; });
