@@ -2,9 +2,12 @@
 import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
-import { parseCalificaFromText, parseHistoriaMensual, parseHistoriaFromOCR } from "../../lib/parseCalifica";
+import { parseCalificaFromText } from "../../lib/parseCalifica";
 
-export const config = { api: { bodyParser: false } };
+// ❗ Vercel (Node runtimes) — sin bodyParser porque viene multipart
+export const config = {
+  api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
+};
 
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
@@ -37,13 +40,12 @@ function puntuar(val) {
   const puntajeTotal = PUNTOS_BASE + Object.values(pts).reduce((a, b) => a + b, 0);
   return { pts, puntajeTotal };
 }
-
 function calcularPI(score) {
   const exp = -((500 - score) * (Math.log(2) / 40));
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ======================= HELPERS ======================= */
+/* ======================= HELPERS BASE ======================= */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) {
@@ -103,8 +105,7 @@ function parseResumenActivosRobusto(text) {
   const pos = base.indexOf(lineMatch);
   const window = base.slice(Math.max(0, pos), pos + 800);
 
-  const nums = pickNumbersNormalized(window)
-    .filter(n => n >= 1 && n <= 999999);
+  const nums = pickNumbersNormalized(window).filter(n => n >= 1 && n <= 999999);
 
   let triple = null;
   for (let i = 0; i <= nums.length - 3; i++) {
@@ -165,20 +166,199 @@ function extractEmpresa(text) {
   return null;
 }
 
+/* ======================= HISTORIA MENSUAL — modo rejilla ======================= */
+function parseHistoriaMensual(text) {
+  const bloqueHistoria = sliceBetween(
+    text,
+    [/Historia:/i, /Historia\s*:/i, /Hist[oó]rico/i],
+    [/(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(DECLARATIVAS)/i, /(INFORMACI[ÓO]N\s+DE PLD)/i]
+  ) || text;
+
+  const lines = bloqueHistoria.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const MONTH_TOKEN = /\b(?:Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/g;
+
+  let headerIdx = -1;
+  let months = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ms = lines[i].match(MONTH_TOKEN);
+    if (ms && ms.length >= 4) {
+      if (ms.length > months.length) {
+        months = ms.map(m => m.replace(/\s+/g, " ").trim());
+        headerIdx = i;
+      }
+    }
+  }
+
+  const toPesosMilesSafe = (n) => (Number.isFinite(n) ? n * 1000 : 0);
+  const numsFrom = (s) => (s.match(/-?\d{1,7}/g) || []).map(x => parseInt(x, 10)).filter(Number.isFinite);
+  const toksFrom = (s) => (s.match(/[A-Z0-9ÁÉÍÓÚÑ\+\-]{2,10}/gi) || []);
+
+  if (headerIdx !== -1 && months.length >= 4) {
+    const ROWS = [
+      { key: "vigente",  re: /^Vigente\b/i,                           numeric: true  },
+      { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
+      { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
+      { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
+      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
+      { key: "rating",   re: /^Calificaci[oó]n\s+de\s+Cartera\b/i,      numeric: false }
+    ];
+
+    function collectRow(rowIndex) {
+      const startRe = ROWS[rowIndex].re;
+      const nextRes = ROWS.slice(rowIndex + 1).map(r => r.re);
+      let start = -1;
+      for (let i = headerIdx + 1; i < Math.min(lines.length, headerIdx + 200); i++) {
+        if (startRe.test(lines[i])) { start = i; break; }
+      }
+      if (start === -1) return [];
+
+      const accNums = [];
+      const accToks = [];
+      for (let i = start; i < Math.min(lines.length, start + 80); i++) {
+        const ln = lines[i];
+        if (nextRes.some(r => r.test(ln))) break;
+        if (ROWS[rowIndex].numeric) accNums.push(...numsFrom(ln));
+        else accToks.push(...toksFrom(ln));
+      }
+
+      if (ROWS[rowIndex].numeric) {
+        const slice = accNums.slice(-months.length);
+        while (slice.length < months.length) slice.unshift(0);
+        return slice.map(toPesosMilesSafe);
+      } else {
+        const onlyAlpha = accToks.filter(t => !/^\d+$/.test(t));
+        const slice = onlyAlpha.slice(-months.length);
+        while (slice.length < months.length) slice.unshift(null);
+        return slice;
+      }
+    }
+
+    const rowsData = {};
+    const ROWS_LIST = ["vigente", "v1_29", "v30_59", "v60_89", "v90p", "rating"];
+    for (let r = 0; r < ROWS_LIST.length; r++) rowsData[ROWS_LIST[r]] = collectRow(r);
+
+    const out = months.map((m, idx) => ({
+      month: m,
+      vigente: rowsData.vigente?.[idx] ?? 0,
+      v1_29:   rowsData.v1_29?.[idx]   ?? 0,
+      v30_59:  rowsData.v30_59?.[idx]  ?? 0,
+      v60_89:  rowsData.v60_89?.[idx]  ?? 0,
+      v90p:    rowsData.v90p?.[idx]    ?? 0,
+      rating:  rowsData.rating?.[idx]  ?? null
+    }));
+
+    return out.slice(-12);
+  }
+
+  // fallback por columnas mes a mes (cuando no hay rejilla)
+  const isMonth = (s) => new RegExp(`^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\\s+20\\d{2}$`, "i").test(s);
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (!isMonth(ln)) continue;
+
+    const month = ln;
+    const slice = lines.slice(i + 1, i + 20);
+
+    const numsFrom = (s) => (s.match(/-?\d{1,7}/g) || []).map(x => parseInt(x, 10)).filter(Number.isFinite);
+    const toPesosMilesSafe = (n) => (Number.isFinite(n) ? n * 1000 : 0);
+
+    const pickVal = (reList) => {
+      const row = slice.find((s) => reList.some((r) => r.test(s)));
+      if (!row) return 0;
+      const nums = numsFrom(row);
+      const last = nums.length ? nums[nums.length - 1] : 0;
+      return toPesosMilesSafe(last);
+    };
+
+    const vigente  = pickVal([/^Vigente\b/i]);
+    const v1_29    = pickVal([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
+    const v30_59   = pickVal([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
+    const v60_89   = pickVal([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
+    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
+
+    let rating = null;
+    const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
+    if (carLine) {
+      const toks = carLine.split(/\s+/).filter(Boolean);
+      rating = toks[toks.length - 1] || null;
+    }
+
+    result.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
+  }
+
+  return result.slice(-12);
+}
+
+/* ======= NUEVO: HISTORIA MENSUAL desde “Créditos Activos” (cuando no hay rejilla) ======= */
+function parseHistoriaMensualDesdeActivos(text) {
+  // bloque entre "Créditos Activos" y "Resumen Créditos Activos" / "Créditos Liquidados"
+  const bloque = sliceBetween(
+    text,
+    [/Cr[eé]ditos?\s+Activos?:/i, /INFORMACI[ÓO]N\s+CREDITICIA/i],
+    [/Resumen\s+Cr[eé]ditos?\s+Activos?/i, /Cr[eé]ditos?\s+Liquidados?/i]
+  );
+
+  if (!bloque) return [];
+
+  // Coincidencias del patrón: MM-AAAA + 9 números (plazo, original, vigente, 1-29, 30-59, 60-89, 90-119, 180+, 120-179)
+  const re = /([01]\d-\d{4})\s+(\d{1,6})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})/g;
+  const agg = new Map();
+
+  const toMonthToken = (mmYYYY) => {
+    const [mm, yyyy] = mmYYYY.split("-");
+    const M = {
+      "01":"Ene","02":"Feb","03":"Mar","04":"Abr","05":"May","06":"Jun",
+      "07":"Jul","08":"Ago","09":"Sep","10":"Oct","11":"Nov","12":"Dic"
+    }[mm] || mm;
+    return `${M} ${yyyy}`;
+    };
+
+  let m;
+  while ((m = re.exec(bloque)) !== null) {
+    const monthTok = toMonthToken(m[1]);
+
+    const vigente  = Number(m[4]) || 0;
+    const v1_29    = Number(m[5]) || 0;
+    const v30_59   = Number(m[6]) || 0;
+    const v60_89   = Number(m[7]) || 0;
+    // “90+” = (90–119) + (120–179) + (180+). En el PDF los dos últimos pueden ir en cualquier orden,
+    // por eso sumamos los tres últimos campos pase lo que pase.
+    const v90p     = (Number(m[8]) || 0) + (Number(m[9]) || 0) + (Number(m[10]) || 0);
+
+    const cur = agg.get(monthTok) || { month: monthTok, vigente:0, v1_29:0, v30_59:0, v60_89:0, v90p:0, rating: null };
+    cur.vigente += vigente * 1000;
+    cur.v1_29   += v1_29   * 1000;
+    cur.v30_59  += v30_59  * 1000;
+    cur.v60_89  += v60_89  * 1000;
+    cur.v90p    += v90p    * 1000;
+    agg.set(monthTok, cur);
+  }
+
+  // ordenar por fecha y regresar últimos 12
+  const order = Array.from(agg.values()).sort((a, b) => {
+    const [ma, ya] = a.month.split(" "); const [mb, yb] = b.month.split(" ");
+    const ix = (m) => "Ene Feb Mar Abr May Jun Jul Ago Sep Oct Nov Dic".split(" ").indexOf(m);
+    return ya === yb ? ix(ma) - ix(mb) : Number(ya) - Number(yb);
+  });
+
+  return order.slice(-12);
+}
+
 /* ======================= HANDLER ======================= */
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
-    const form = formidable({ multiples: true });
+    const form = formidable({ multiples: false, keepExtensions: true });
     const { files, fields } = await new Promise((resolve, reject) => {
       form.parse(req, (err, flds, fls) => (err ? reject(err) : resolve({ fields: flds, files: fls })));
     });
 
-    const pdfFile = files?.file?.[0] || files?.file;
-    if (!pdfFile?.filepath) return res.status(400).send("No se recibió archivo PDF");
+    const file = files?.file?.[0] || files?.file;
+    if (!file?.filepath) return res.status(400).send("No se recibió archivo");
 
-    const buffer = await readFile(pdfFile.filepath);
+    const buffer = await readFile(file.filepath);
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
@@ -208,21 +388,10 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual (intento 1: texto del PDF)
+    // Historia mensual — primero intentamos la rejilla; si no existe, calculamos desde “Créditos Activos”
     let historyMonthly = parseHistoriaMensual(text);
-
-    // Fallback: si no hay historia y nos mandaron una imagen de esa sección, aplicamos OCR
-    if ((!historyMonthly || historyMonthly.length === 0) && (files?.historyImage || files?.historyimage)) {
-      const img = (files.historyImage?.[0] || files.historyImage || files.historyimage?.[0] || files.historyimage);
-      if (img?.filepath) {
-        try {
-          const imgBuf = await readFile(img.filepath);
-          const ocrOut = await parseHistoriaFromOCR(imgBuf); // devuelve mismo shape que parseHistoriaMensual
-          if (ocrOut?.length) historyMonthly = ocrOut;
-        } catch (err) {
-          console.warn("OCR fallback failed:", err);
-        }
-      }
+    if (!historyMonthly || historyMonthly.length === 0) {
+      historyMonthly = parseHistoriaMensualDesdeActivos(text);
     }
 
     // Códigos por ID
@@ -249,7 +418,7 @@ export default async function handler(req, res) {
         totalVencidoPesos,
         maxCreditPesos: pesosMax,
       },
-      historyMonthly, // ← si vino del PDF, genial; si no, se intentó por OCR
+      historyMonthly,
     });
   } catch (e) {
     console.error("analyzePdf error:", e);
