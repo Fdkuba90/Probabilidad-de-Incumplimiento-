@@ -276,7 +276,7 @@ function parseHistoriaMensual(text) {
     const v1_29    = pickVal([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
     const v30_59   = pickVal([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
     const v60_89   = pickVal([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
-    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
+    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s*89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
 
     let rating = null;
     const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
@@ -291,20 +291,17 @@ function parseHistoriaMensual(text) {
   return result.slice(-12);
 }
 
-/* ======= NUEVO: HISTORIA desde “Créditos Activos” (cuando no hay rejilla) ======= */
-// (Esta función queda disponible si quieres usarla en el futuro)
+/* ======= HISTORIA desde “Créditos Activos” (tercer intento) ======= */
 function parseHistoriaMensualDesdeActivos(text) {
   const bloque = sliceBetween(
     text,
     [/Cr[eé]ditos?\s+Activos?:/i, /INFORMACI[ÓO]N\s+CREDITICIA/i],
     [/Resumen\s+Cr[eé]ditos?\s+Activos?/i, /Cr[eé]ditos?\s+Liquidados?/i]
   );
-
   if (!bloque) return [];
 
   const re = /([01]\d-\d{4})\s+(\d{1,6})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})\s+(\d{1,9})/g;
   const agg = new Map();
-
   const toMonthToken = (mmYYYY) => {
     const [mm, yyyy] = mmYYYY.split("-");
     const M = {
@@ -317,7 +314,6 @@ function parseHistoriaMensualDesdeActivos(text) {
   let m;
   while ((m = re.exec(bloque)) !== null) {
     const monthTok = toMonthToken(m[1]);
-
     const vigente  = Number(m[4]) || 0;
     const v1_29    = Number(m[5]) || 0;
     const v30_59   = Number(m[6]) || 0;
@@ -342,23 +338,43 @@ function parseHistoriaMensualDesdeActivos(text) {
   return order.slice(-12);
 }
 
-/* ======================= FIX: Mapear parseHistoriaFromText al mismo formato ======================= */
+/* ======================= FIX: Mapear + Autoscale ======================= */
 function coerceNum(n) {
   const v = Number(n);
   return Number.isFinite(v) ? v : 0;
 }
 function mapHistoriaFromLib(hObj) {
-  // hObj viene de parseHistoriaFromText: { historiaRaw, meses, filas }
   if (!hObj || !Array.isArray(hObj.filas)) return [];
-  return hObj.filas.slice(-12).map(r => ({
-    month: r.mes || null,
-    vigente:  coerceNum(r.vigente),
-    v1_29:    coerceNum(r.d1_29),
-    v30_59:   coerceNum(r.d30_59),
-    v60_89:   coerceNum(r.d60_89),
-    v90p:     coerceNum(r.d90_plus),
-    rating:   r.calificacion || null,
+  const arr = hObj.filas.slice(-12).map(r => ({
+    month:   r.mes || null,
+    vigente: coerceNum(r.vigente),
+    v1_29:   coerceNum(r.d1_29),
+    v30_59:  coerceNum(r.d30_59),
+    v60_89:  coerceNum(r.d60_89),
+    v90p:    coerceNum(r.d90_plus),
+    rating:  r.calificacion || null,
   }));
+  return autoscaleHistory(arr);
+}
+function autoscaleHistory(items) {
+  // Si los importes son muy pequeños (p.ej. < 100,000) pero deberían ser MXN,
+  // asumimos que vienen en MIL y escalamos ×1000.
+  const vals = [];
+  for (const r of items) {
+    vals.push(r.vigente, r.v1_29, r.v30_59, r.v60_89, r.v90p);
+  }
+  const max = Math.max(0, ...vals.filter(n => Number.isFinite(n)));
+  if (max > 0 && max < 100000) {
+    return items.map(r => ({
+      ...r,
+      vigente: r.vigente * 1000,
+      v1_29:   r.v1_29   * 1000,
+      v30_59:  r.v30_59  * 1000,
+      v60_89:  r.v60_89  * 1000,
+      v90p:    r.v90p    * 1000,
+    }));
+  }
+  return items;
 }
 
 /* ======================= HANDLER ======================= */
@@ -378,7 +394,7 @@ export default async function handler(req, res) {
     const parsed = await pdfParse(buffer);
     const text = parsed?.text || "";
 
-    // Califica (IDs/valores/códigos)
+    // Califica
     const { indicadores, calificaRaw } = parseCalificaFromText(text);
     const valores = {};
     for (const it of indicadores) {
@@ -404,11 +420,14 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual — primero intentamos la rejilla; si no existe, usamos parseHistoriaFromText y mapeamos al mismo formato
+    // Historia mensual — 1) rejilla; 2) parseHistoriaFromText; 3) desde Activos
     let historyMonthly = parseHistoriaMensual(text);
     if (!historyMonthly || historyMonthly.length === 0) {
       const h2 = parseHistoriaFromText(text); // { historiaRaw, meses, filas }
-      historyMonthly = mapHistoriaFromLib(h2); // <-- ahora siempre es un arreglo [{month, ...}]
+      historyMonthly = mapHistoriaFromLib(h2);
+    }
+    if (!historyMonthly || historyMonthly.length === 0) {
+      historyMonthly = parseHistoriaMensualDesdeActivos(text);
     }
 
     // Códigos por ID
