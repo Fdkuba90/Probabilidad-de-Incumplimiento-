@@ -42,7 +42,7 @@ function calcularPI(score) {
   return 1 / (1 + Math.exp(exp));
 }
 
-/* ======================= HELPERS ======================= */
+/* ======================= HELPERS BASE ======================= */
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) {
@@ -141,37 +141,45 @@ function parseResumenActivosRobusto(text) {
 
 /* ======================= EMPRESA ======================= */
 function extractEmpresa(text) {
+  // 1) mismo renglón
   let m = text.match(/Nombre\/Raz[oó]n Social:\s*([^\n\r]+)/i);
   if (m) {
     const cand = m[1].trim();
     if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
+  // 2) renglón anterior
   m = text.match(/([^\n\r]+?)\s*Nombre\/Raz[oó]n Social:/i);
   if (m) {
     const cand = m[1].trim();
     if (cand && !/^(Direcci[oó]n|RFC|CURP|Datos Generales)/i.test(cand)) return cand;
   }
+  // 3) renglón siguiente
   const idx = text.search(/Nombre\/Raz[oó]n Social:/i);
   if (idx >= 0) {
     const tail = text.slice(idx).split(/\r?\n/);
     for (let i = 1; i < Math.min(tail.length, 5); i++) {
       const cand = (tail[i] || "").trim();
       if (!cand) continue;
-      if (/^(Direcci[oó]n|RFC|CURP|Datos Generales|Colonia|Del\.?\/Mun|Ciudad|C[óo]digo Postal|Estado|Pa[ií]s|Tel[eé]fono|Fax)/i.test(cand)) {
-        continue;
-      }
+      if (/^(Direcci[oó]n|RFC|CURP|Datos Generales|Colonia|Del\.?\/Mun|Ciudad|C[óo]digo Postal|Estado|Pa[ií]s|Tel[eé]fono|Fax)/i.test(cand)) continue;
       return cand;
     }
   }
   return null;
 }
 
-/* ======================= HISTORIA MENSUAL (rejilla robusta) ======================= */
+/* ======================= HISTORIA MENSUAL (rejilla + fallback) ======================= */
 function parseHistoriaMensual(text) {
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  // Recortamos un bloque alrededor de "Historia"
+  const bloqueHistoria = sliceBetween(
+    text,
+    [/Historia:/i, /Historia\s*:/i, /Hist[oó]rico/i],
+    [/(INFORMACI[ÓO]N\s+COMERCIAL)/i, /(DECLARATIVAS)/i, /(INFORMACI[ÓO]N\s+DE PLD)/i]
+  ) || text;
+
+  const lines = bloqueHistoria.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const MONTH_TOKEN = /\b(?:Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}\b/g;
 
-  // 1) localizar encabezado con más meses
+  /* ---------- MODO A: REJILLA (encabezado con muchos meses) ---------- */
   let headerIdx = -1;
   let months = [];
   for (let i = 0; i < lines.length; i++) {
@@ -183,71 +191,107 @@ function parseHistoriaMensual(text) {
       }
     }
   }
-  if (headerIdx === -1 || months.length === 0) return []; // no está en rejilla
 
-  const ROWS = [
-    { key: "vigente",  re: /^Vigente\b/i,                           numeric: true  },
-    { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
-    { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
-    { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
-    { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
-    { key: "rating",   re: /^Calificaci[oó]n\s+de\s+Cartera\b/i,      numeric: false }
-  ];
-
-  const toPesosMiles = (n) => (Number.isFinite(n) ? n * 1000 : 0);
+  const toPesosMilesSafe = (n) => (Number.isFinite(n) ? n * 1000 : 0);
   const numsFrom = (s) => (s.match(/-?\d{1,7}/g) || []).map(x => parseInt(x, 10)).filter(Number.isFinite);
   const toksFrom = (s) => (s.match(/[A-Z0-9ÁÉÍÓÚÑ\+\-]{2,10}/gi) || []);
 
-  function collectRow(rowIndex) {
-    const startRe = ROWS[rowIndex].re;
-    const nextRes = ROWS.slice(rowIndex + 1).map(r => r.re);
+  if (headerIdx !== -1 && months.length >= 4) {
+    const ROWS = [
+      { key: "vigente",  re: /^Vigente\b/i,                           numeric: true  },
+      { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
+      { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
+      { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
+      { key: "v90p",     re: /^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, numeric: true  },
+      { key: "rating",   re: /^Calificaci[oó]n\s+de\s+Cartera\b/i,      numeric: false }
+    ];
 
-    let start = -1;
-    for (let i = headerIdx + 1; i < Math.min(lines.length, headerIdx + 200); i++) {
-      if (startRe.test(lines[i])) { start = i; break; }
-    }
-    if (start === -1) return [];
+    function collectRow(rowIndex) {
+      const startRe = ROWS[rowIndex].re;
+      const nextRes = ROWS.slice(rowIndex + 1).map(r => r.re);
 
-    const accNums = [];
-    const accToks = [];
-    for (let i = start; i < Math.min(lines.length, start + 80); i++) {
-      const ln = lines[i];
-      if (nextRes.some(r => r.test(ln))) break;
+      let start = -1;
+      for (let i = headerIdx + 1; i < Math.min(lines.length, headerIdx + 200); i++) {
+        if (startRe.test(lines[i])) { start = i; break; }
+      }
+      if (start === -1) return [];
+
+      const accNums = [];
+      const accToks = [];
+      for (let i = start; i < Math.min(lines.length, start + 80); i++) {
+        const ln = lines[i];
+        if (nextRes.some(r => r.test(ln))) break;
+        if (ROWS[rowIndex].numeric) accNums.push(...numsFrom(ln));
+        else accToks.push(...toksFrom(ln));
+      }
+
       if (ROWS[rowIndex].numeric) {
-        accNums.push(...numsFrom(ln));
+        const slice = accNums.slice(-months.length);
+        while (slice.length < months.length) slice.unshift(0);
+        return slice.map(toPesosMilesSafe);
       } else {
-        accToks.push(...toksFrom(ln));
+        const onlyAlpha = accToks.filter(t => !/^\d+$/.test(t));
+        const slice = onlyAlpha.slice(-months.length);
+        while (slice.length < months.length) slice.unshift(null);
+        return slice;
       }
     }
 
-    if (ROWS[rowIndex].numeric) {
-      const slice = accNums.slice(-months.length);
-      while (slice.length < months.length) slice.unshift(0);
-      return slice.map(toPesosMiles);
-    } else {
-      const onlyAlpha = accToks.filter(t => !/^\d+$/.test(t));
-      const slice = onlyAlpha.slice(-months.length);
-      while (slice.length < months.length) slice.unshift(null);
-      return slice;
+    const rowsData = {};
+    const ROWS_LIST = ["vigente", "v1_29", "v30_59", "v60_89", "v90p", "rating"];
+    for (let r = 0; r < ROWS_LIST.length; r++) {
+      rowsData[ROWS_LIST[r]] = collectRow(r);
     }
+
+    const out = months.map((m, idx) => ({
+      month: m,
+      vigente: rowsData.vigente?.[idx] ?? 0,
+      v1_29:   rowsData.v1_29?.[idx]   ?? 0,
+      v30_59:  rowsData.v30_59?.[idx]  ?? 0,
+      v60_89:  rowsData.v60_89?.[idx]  ?? 0,
+      v90p:    rowsData.v90p?.[idx]    ?? 0,
+      rating:  rowsData.rating?.[idx]  ?? null
+    }));
+
+    return out.slice(-12);
   }
 
-  const rowsData = {};
-  for (let r = 0; r < ROWS.length; r++) {
-    rowsData[ROWS[r].key] = collectRow(r);
+  /* ---------- MODO B: COLUMNA POR MES (fallback) ---------- */
+  const isMonth = (s) => new RegExp(`^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\\s+20\\d{2}$`, "i").test(s);
+
+  const result = [];
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (!isMonth(ln)) continue;
+
+    const month = ln;
+    const slice = lines.slice(i + 1, i + 20);
+
+    const pickVal = (reList) => {
+      const row = slice.find((s) => reList.some((r) => r.test(s)));
+      if (!row) return 0;
+      const nums = numsFrom(row);
+      const last = nums.length ? nums[nums.length - 1] : 0;
+      return toPesosMilesSafe(last);
+    };
+
+    const vigente  = pickVal([/^Vigente\b/i]);
+    const v1_29    = pickVal([/^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, /^1-?29\b/i]);
+    const v30_59   = pickVal([/^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, /^30-?59\b/i]);
+    const v60_89   = pickVal([/^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, /^60-?89\b/i]);
+    const v90p     = pickVal([/^(Vencido\s+a\s+m[aá]s\s+de\s+89\s*d[ií]as|90\+|>89)\b/i, /^m[aá]s\s+de\s+89/i]);
+
+    let rating = null;
+    const carLine = slice.find((s) => /^Calificaci[oó]n\s+de\s+Cartera\b/i.test(s));
+    if (carLine) {
+      const toks = carLine.split(/\s+/).filter(Boolean);
+      rating = toks[toks.length - 1] || null;
+    }
+
+    result.push({ month, vigente, v1_29, v30_59, v60_89, v90p, rating });
   }
 
-  const out = months.map((m, idx) => ({
-    month: m,
-    vigente: rowsData.vigente?.[idx] ?? 0,
-    v1_29:   rowsData.v1_29?.[idx]   ?? 0,
-    v30_59:  rowsData.v30_59?.[idx]  ?? 0,
-    v60_89:  rowsData.v60_89?.[idx]  ?? 0,
-    v90p:    rowsData.v90p?.[idx]    ?? 0,
-    rating:  rowsData.rating?.[idx]  ?? null
-  }));
-
-  return out.slice(-12);
+  return result.slice(-12);
 }
 
 /* ======================= HANDLER ======================= */
@@ -285,7 +329,7 @@ export default async function handler(req, res) {
     const { pts, puntajeTotal } = puntuar(valores);
     const pi = calcularPI(puntajeTotal);
 
-    // Totales de la tabla “Totales:”
+    // Totales
     const {
       totalOriginalPesos,
       totalSaldoActualPesos,
@@ -293,7 +337,7 @@ export default async function handler(req, res) {
       totalVencidoPesos,
     } = parseResumenActivosRobusto(text);
 
-    // Historia mensual (rejilla)
+    // Historia mensual
     const historyMonthly = parseHistoriaMensual(text);
 
     // Códigos por ID
