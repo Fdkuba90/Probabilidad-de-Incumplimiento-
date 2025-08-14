@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — Parser robusto de "Historia:" sin OCR + scoring/PI
+// pages/api/analyzePdf.js — Parser robusto de "Historia:" sin OCR + scoring/PI (con parches anti-pegar-año)
 export const runtime = 'nodejs';
 
 import formidable from "formidable";
@@ -25,7 +25,6 @@ function normalizeText(text = "") {
     .replace(/\n{2,}/g, "\n")
     .trim();
 }
-
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
@@ -34,24 +33,21 @@ function sliceBetween(txt, fromReList, toReList) {
   for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
   return rest;
 }
-
-// <-- FALTABA EN TU ARCHIVO
+// usado en Califica
 function parseNumLoose(v) {
   if (v == null) return null;
   let s = String(v).trim().replace(/\u00A0/g, " ").replace(/\s+/g, "");
   if (s === "" || s === "--") return null;
-  // Si trae coma decimal (p.ej. 0,85) normalizamos a punto
-  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
-  // Quita separadores de miles sueltos (puntos/espacios)
-  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, "");
-  // Quita comas de miles si vinieran mezcladas
+  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, "."); // coma decimal
+  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, ""); // sep de miles
   s = s.replace(/,(?=\d{3}(?:\D|$))/g, "");
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
-
 const clamp01 = (x) => x == null ? null : Math.max(0, Math.min(1, x));
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
+// helper anti “años”
+const isYear = (n) => /^\s*20\d{2}\s*$/.test(String(n));
 
 // ===== Orden de meses =====
 const MES_IDX = { Ene:0, Feb:1, Mar:2, Abr:3, May:4, Jun:5, Jul:6, Ago:7, Sep:8, Oct:9, Nov:10, Dic:11 };
@@ -120,7 +116,7 @@ function extractHistoriaMonths(fullText) {
   return months.slice(-12);
 }
 
-// ====== 1) tabla precisa dentro de Historia ======
+// ====== 1) tabla precisa dentro de Historia (PATCH) ======
 function parseHistoriaTablaPrecisa(fullText) {
   const bloque = getHistoriaBlock(fullText);
   if (!bloque) return { rows: [], historiaRaw: "" };
@@ -128,10 +124,12 @@ function parseHistoriaTablaPrecisa(fullText) {
   const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
 
-  const NUM_RE = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
+  // PATCH: tokens numéricos sin espacios intermedios y con miles/decimales típicos
+  const NUM_RE = /(?:[-]?\d{1,3}(?:[.,]\d{3})+|[-]?\d+(?:[.,]\d+)?)/g;
   const toNumMiles = (s) => {
-    const canon = String(s).replace(/\u00A0/g, " ").replace(/\s+/g, "")
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "").replace(/,/g, ".");
+    const canon = String(s).replace(/\u00A0/g, " ").trim()
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "") // quita sep. miles
+      .replace(/,/g, "."); // coma decimal a punto
     const n = Number(canon);
     return Number.isFinite(n) ? Math.round(n * 1000) : NaN;
   };
@@ -149,19 +147,22 @@ function parseHistoriaTablaPrecisa(fullText) {
     const end = k + 1 < months.length ? monthIdx[k + 1] : Math.min(lines.length, start + 60);
     const seg = lines.slice(start + 1, end).join(" ");
 
-    // “Vigente <n>” o “<n> Vigente”
-    const BEFORE_VIG = /(-?(?:\d[\s\u00A0.,]?){1,14})\s*Vigente\b/i;
-    const AFTER_VIG  = /\bVigente\b\s*(-?(?:\d[\s\u00A0.,]?){1,14})/i;
+    // PATCH: no permitir espacios dentro del número y evitar años
+    const BEFORE_VIG = /([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)\s*Vigente\b/i;
+    const AFTER_VIG  = /\bVigente\b\s*([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)/i;
 
     let vigente = 0;
     let m = seg.match(BEFORE_VIG);
-    if (m?.[1]) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
+    if (m?.[1] && !isYear(m[1])) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
     if (!vigente) {
       m = seg.match(AFTER_VIG);
-      if (m?.[1]) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
+      if (m?.[1] && !isYear(m[1])) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
     }
     if (!vigente) {
-      const nums = (seg.match(NUM_RE) || []).map(toNumMiles).filter(n => Number.isFinite(n) && n >= 100_000 && n <= 100_000_000);
+      const nums = (seg.match(NUM_RE) || [])
+        .filter(x => !isYear(x))
+        .map(toNumMiles)
+        .filter(n => Number.isFinite(n) && n > 0 && n <= 1_000_000); // 1,000,000 miles = $1,000,000,000
       if (nums.length) vigente = Math.max(...nums);
     }
 
@@ -172,7 +173,7 @@ function parseHistoriaTablaPrecisa(fullText) {
   return { rows: out.slice(-12), historiaRaw: bloque };
 }
 
-// ====== 2) modo rejilla (meses en cabecera) ======
+// ====== 2) modo rejilla (meses en cabecera) (PATCH suave) ======
 function parseHistoriaMensual(text) {
   const bloqueHistoria = getHistoriaBlock(text) || text;
   const lines = (bloqueHistoria).split(/\n/).map(s => s.trim()).filter(Boolean);
@@ -188,16 +189,18 @@ function parseHistoriaMensual(text) {
   }
   if (headerIdx === -1 || months.length < 4) return { rows: [], historiaRaw: bloqueHistoria };
 
-  const NUM_TOKEN = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
+  // PATCH: token numérico estricto y filtro de años
+  const NUM_TOKEN = /(?:[-]?\d{1,3}(?:[.,]\d{3})+|[-]?\d+(?:[.,]\d+)?)/g;
   const toNumMiles = (s) => {
-    const canon = String(s).replace(/\u00A0/g, " ").replace(/\s+/g, "")
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "").replace(/,/g, ".");
+    const canon = String(s).replace(/\u00A0/g, " ").trim()
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")
+      .replace(/,/g, ".");
     const v = Number(canon);
     return Number.isFinite(v) ? Math.round(v * 1000) : NaN;
   };
 
   const ROWS = [
-    { key: "vigente",  re: /^Vigente\b/i,                           numeric: true  },
+    { key: "vigente",  re: /^Vigente\b/i,                            numeric: true  },
     { key: "v1_29",    re: /^Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, numeric: true  },
     { key: "v30_59",   re: /^Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, numeric: true  },
     { key: "v60_89",   re: /^Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, numeric: true  },
@@ -220,7 +223,7 @@ function parseHistoriaMensual(text) {
       const ln = lines[i];
       if (nextRes.some(r => r.test(ln))) break;
       if (ROWS[rowIndex].numeric) {
-        const toks = ln.match(NUM_TOKEN) || [];
+        const toks = (ln.match(NUM_TOKEN) || []).filter(t => !isYear(t));
         accNums.push(...toks.map(toNumMiles).filter(Number.isFinite));
       } else {
         const toks = ln.match(/\b\d[A-Z]\d\b/gi) || [];
@@ -257,16 +260,17 @@ function parseHistoriaMensual(text) {
   return { rows: out.slice(-12), historiaRaw: bloqueHistoria };
 }
 
-// ====== 3) modo “greedy” (mes + número de “Vigente” alrededor) ======
+// ====== 3) modo “greedy” (mes + número de “Vigente” alrededor) (PATCH) ======
 function parseHistoriaGreedy(fullText) {
   const bloque = getHistoriaBlock(fullText) || fullText;
   const lines = bloque.split(/\n/);
   const get = (i) => (i >=0 && i < lines.length ? lines[i] : "");
 
   const MES = /(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+(20\d{2})/i;
-  const NUM = /-?(?:\d[\s\u00A0.,]?){1,14}/g;
+  // PATCH: patrón numérico estricto
+  const NUM = /(?:[-]?\d{1,3}(?:[.,]\d{3})+|[-]?\d+(?:[.,]\d+)?)/g;
   const toMiles = (s) => {
-    const c = String(s).replace(/\u00A0/g," ").replace(/\s+/g,"")
+    const c = String(s).replace(/\u00A0/g," ").trim()
       .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g,"").replace(/,/g,".");
     const n = Number(c);
     return Number.isFinite(n) ? Math.round(n*1000) : NaN;
@@ -282,16 +286,21 @@ function parseHistoriaGreedy(fullText) {
     if (seen.has(mes)) continue;
     seen.add(mes);
 
-    // Ventana alrededor del mes
-    const window = [get(i-2), get(i-1), get(i), get(i+1), get(i+2), get(i+3)].join(" ");
-    // Prioriza números pegados a “Vigente”
+    // Ventana alrededor del mes (PATCH: elimina años)
+    let window = [get(i-2), get(i-1), get(i), get(i+1), get(i+2), get(i+3)].join(" ");
+    window = window.replace(/\b20\d{2}\b/g, "");
+
+    // Prioriza números pegados a “Vigente” (sin espacios en el número)
     let vigente = 0;
-    const m1 = window.match(/(-?(?:\d[\s., ]?){1,14})\s*Vigente\b/i);
-    const m2 = window.match(/\bVigente\b\s*(-?(?:\d[\s., ]?){1,14})/i);
-    if (m1?.[1]) { const v = toMiles(m1[1]); if (Number.isFinite(v) && v>0) vigente = v; }
-    if (!vigente && m2?.[1]) { const v = toMiles(m2[1]); if (Number.isFinite(v) && v>0) vigente = v; }
+    const m1 = window.match(/([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)\s*Vigente\b/i);
+    const m2 = window.match(/\bVigente\b\s*([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)/i);
+    if (m1?.[1] && !isYear(m1[1])) { const v = toMiles(m1[1]); if (Number.isFinite(v) && v>0) vigente = v; }
+    if (!vigente && m2?.[1] && !isYear(m2[1])) { const v = toMiles(m2[1]); if (Number.isFinite(v) && v>0) vigente = v; }
     if (!vigente) {
-      const nums = (window.match(NUM)||[]).map(toMiles).filter(n => Number.isFinite(n) && n>0 && n<=100_000_000);
+      const nums = (window.match(NUM)||[])
+        .filter(x => !isYear(x))
+        .map(toMiles)
+        .filter(n => Number.isFinite(n) && n>0 && n<=1_000_000);
       if (nums.length) vigente = Math.max(...nums);
     }
 
@@ -490,7 +499,6 @@ export default async function handler(req, res) {
       }
       if (!historyMonthly.length) {
         flags.push({ tipo: "historia_desde_activos", detalle: "No se halló bloque 'Historia:' legible; se intenta desde Activos." });
-        // (Si quieres, aquí podrías integrar tu parseHistoriaMensualDesdeActivos(text))
       }
     }
 
@@ -544,3 +552,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: e?.message || "Error procesando el PDF" });
   }
 }
+
