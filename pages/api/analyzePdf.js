@@ -5,7 +5,7 @@ import formidable from "formidable";
 import pdfParse from "pdf-parse";
 import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
-import { extractHistoriaOCR } from "../../lib/ocrHistoria"; // <-- NUEVO (OCR Historia)
+import { extractHistoriaOCR } from "../../lib/ocrHistoria"; // OCR Historia
 
 // Next API config
 export const config = {
@@ -192,7 +192,7 @@ export default async function handler(req, res) {
 
     const buffer = await readFile(file.filepath);
 
-    // -------- obtener texto para Califica/Resumen --------
+    // -------- obtener texto (Califica / Empresa / Resumen) --------
     const parsed = await pdfParse(buffer).catch((e) => { throw new Error("No se pudo leer el PDF: " + (e?.message || e)); });
     const text = normalizeText(parsed?.text || "");
 
@@ -218,7 +218,7 @@ export default async function handler(req, res) {
     // -------- Totales --------
     const resumen = parseResumenActivosRobusto(text);
 
-    // -------- Historia (OCR directo) --------
+    // -------- Historia (OCR) --------
     const flags = [];
     let historyMonthly = [];
     let historiaRaw = "";
@@ -236,11 +236,11 @@ export default async function handler(req, res) {
 
     // -------- Orden y últimos 12 --------
     if (Array.isArray(historyMonthly)) {
-      const MES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+      const MESES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
       historyMonthly.sort((a, b) => {
         const [ma, ya] = (a.month||"").split(/\s+/);
         const [mb, yb] = (b.month||"").split(/\s+/);
-        const ia = MES.indexOf(ma); const ib = MES.indexOf(mb);
+        const ia = MESES.indexOf(ma); const ib = MESES.indexOf(mb);
         return (ya - yb) || (ia - ib);
       });
       historyMonthly = historyMonthly.slice(-12);
