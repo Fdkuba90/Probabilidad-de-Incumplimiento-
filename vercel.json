@@ -1,3 +1,4 @@
+fix(vercel): use v2 config + nodejs20.x
 {
   "version": 2,
   "functions": {
