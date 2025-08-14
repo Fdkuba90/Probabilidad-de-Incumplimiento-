@@ -13,10 +13,9 @@
     "react-dom": "18.2.0",
 
     "@napi-rs/canvas": "^0.1.53",
+    "formidable": "^3.5.4",
     "pdfjs-dist": "^4.8.69",
     "pdf-parse": "^1.1.1",
-    "sharp": "^0.33.4",
-    "tesseract.js": "^5.1.0",
-    "formidable": "^3.5.4"
+    "tesseract.js": "^5.1.0"
   }
 }
