@@ -25,6 +25,7 @@ function normalizeText(text = "") {
     .replace(/\n{2,}/g, "\n")
     .trim();
 }
+
 function sliceBetween(txt, fromReList, toReList) {
   let fromIdx = -1;
   for (const re of fromReList) { const i = txt.search(re); if (i !== -1) { fromIdx = i; break; } }
@@ -33,16 +34,22 @@ function sliceBetween(txt, fromReList, toReList) {
   for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
   return rest;
 }
+
+// <-- FALTABA EN TU ARCHIVO
 function parseNumLoose(v) {
   if (v == null) return null;
   let s = String(v).trim().replace(/\u00A0/g, " ").replace(/\s+/g, "");
   if (s === "" || s === "--") return null;
-  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, "."); // coma decimal
-  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, ""); // sep de miles
+  // Si trae coma decimal (p.ej. 0,85) normalizamos a punto
+  if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
+  // Quita separadores de miles sueltos (puntos/espacios)
+  s = s.replace(/(?<=\d)[\s.](?=\d{3}(?:\D|$))/g, "");
+  // Quita comas de miles si vinieran mezcladas
   s = s.replace(/,(?=\d{3}(?:\D|$))/g, "");
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
+
 const clamp01 = (x) => x == null ? null : Math.max(0, Math.min(1, x));
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
