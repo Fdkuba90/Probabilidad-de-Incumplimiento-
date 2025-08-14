@@ -116,59 +116,124 @@ function extractHistoriaMonths(fullText) {
   return months.slice(-12);
 }
 
-// ====== 1) tabla precisa dentro de Historia (PATCH) ======
+// ====== 1) tabla precisa dentro de Historia — MODO SECUENCIAL ======
 function parseHistoriaTablaPrecisa(fullText) {
   const bloque = getHistoriaBlock(fullText);
   if (!bloque) return { rows: [], historiaRaw: "" };
 
-  const lines = bloque.split(/\n/).map(s => s.trim()).filter(Boolean);
+  // Normaliza y separa líneas
+  const lines = bloque
+    .replace(/\u00A0/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .split(/\n/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  // Tokens de mes exactos “Ene 2023 … Dic 2099”
   const MES_RE = /^(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)\s+20\d{2}$/i;
 
-  // PATCH: tokens numéricos sin espacios intermedios y con miles/decimales típicos
-  const NUM_RE = /(?:[-]?\d{1,3}(?:[.,]\d{3})+|[-]?\d+(?:[.,]\d+)?)/g;
+  // Números sin espacios internos (evita “2023 28487”)
+  // Soporta "12,345", "12.345", "12345", "12,3"
+  const NUM_RE = /(?:-?\d{1,3}(?:[.,]\d{3})+|-?\d+(?:[.,]\d+)?)/g;
+
+  const isYear = (t) => /^\s*20\d{2}\s*$/.test(String(t));
+
   const toNumMiles = (s) => {
-    const canon = String(s).replace(/\u00A0/g, " ").trim()
-      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "") // quita sep. miles
-      .replace(/,/g, "."); // coma decimal a punto
+    const canon = String(s)
+      .replace(/\u00A0/g, " ")
+      .trim()
+      // quita separadores de miles (.,) entre grupos de 3
+      .replace(/(?<=\d)[.,](?=\d{3}(?:\D|$))/g, "")
+      // coma decimal -> punto
+      .replace(/,/g, ".");
     const n = Number(canon);
-    return Number.isFinite(n) ? Math.round(n * 1000) : NaN;
+    return Number.isFinite(n) ? Math.round(n * 1000) : NaN; // valores están en miles de pesos
   };
 
+  // Busca índices de todas las líneas que son “Mes Año”
   const monthIdx = [];
-  const months = [];
+  const monthTokens = [];
   for (let i = 0; i < lines.length; i++) {
-    if (MES_RE.test(lines[i])) { monthIdx.push(i); months.push(lines[i].replace(/\s+/g, " ")); }
+    if (MES_RE.test(lines[i])) {
+      monthIdx.push(i);
+      monthTokens.push(lines[i].replace(/\s+/g, " "));
+    }
   }
-  if (!months.length) return { rows: [], historiaRaw: bloque };
+  if (!monthIdx.length) return { rows: [], historiaRaw: bloque };
+
+  // Helper: obtiene el valor numérico de una fila por etiqueta dentro del rango [start, end)
+  function pickNumberForLabel(labelRe, start, end) {
+    // 1) Busca la línea de la etiqueta
+    let li = -1;
+    for (let i = start; i < end; i++) {
+      if (labelRe.test(lines[i])) { li = i; break; }
+    }
+    if (li === -1) return 0;
+
+    // 2) Toma números de esa línea y, si no hay, de la siguiente
+    const candidates = [];
+    const same = lines[li].match(NUM_RE) || [];
+    const next = (li + 1 < end) ? (lines[li + 1].match(NUM_RE) || []) : [];
+    for (const t of [...same, ...next]) {
+      if (!isYear(t)) candidates.push(t);
+    }
+    if (!candidates.length) return 0;
+
+    // 3) Elige el primero que sea válido y positivo, con tope sano
+    const ns = candidates.map(toNumMiles).filter(n => Number.isFinite(n) && n >= 0 && n <= 1_000_000);
+    if (!ns.length) return 0;
+    return ns[0];
+  }
+
+  // Helper: obtiene la/s calificación(es) de cartera como string “1NC 4A1 …”
+  function pickRating(start, end) {
+    // Captura tokens tipo “1NC”, “4A1”, “1B2”, etc., y permite varios separados por espacios
+    // Ejemplos del buró: “1NC 4A1” / “1NC 1B3 4A1”
+    const TOKEN = /\b\d(?:NC|[A-Z]\d)\b/g; // 1NC | 4A1 | 1B2 ...
+    let li = -1;
+    for (let i = start; i < end; i++) {
+      if (/^Calificaci[oó]n\s+de\s+Cartera\b/i.test(lines[i])) { li = i; break; }
+    }
+    if (li === -1) return null;
+
+    const tokens = new Set();
+    // misma línea y siguientes 2 por si se parte el renglón
+    for (let k = li; k < Math.min(end, li + 3); k++) {
+      const tks = lines[k].match(TOKEN) || [];
+      tks.forEach(t => tokens.add(t));
+    }
+    if (!tokens.size) return null;
+    return Array.from(tokens).join(" ");
+  }
 
   const out = [];
-  for (let k = 0; k < months.length; k++) {
+
+  for (let k = 0; k < monthIdx.length; k++) {
     const start = monthIdx[k];
-    const end = k + 1 < months.length ? monthIdx[k + 1] : Math.min(lines.length, start + 60);
-    const seg = lines.slice(start + 1, end).join(" ");
+    const end = (k + 1 < monthIdx.length) ? monthIdx[k + 1] : Math.min(lines.length, start + 80);
+    const month = monthTokens[k];
 
-    // PATCH: no permitir espacios dentro del número y evitar años
-    const BEFORE_VIG = /([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)\s*Vigente\b/i;
-    const AFTER_VIG  = /\bVigente\b\s*([\-]?\d{1,3}(?:[.,]\d{3})+|[\-]?\d+(?:[.,]\d+)?)/i;
+    // Orden fijo como en el buró
+    const vigente  = pickNumberForLabel(/^\s*Vigente\b/i, start, end);
+    const v1_29    = pickNumberForLabel(/^\s*Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, start, end);
+    const v30_59   = pickNumberForLabel(/^\s*Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, start, end);
+    const v60_89   = pickNumberForLabel(/^\s*Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, start, end);
+    const v90p     = pickNumberForLabel(/^\s*Vencido\s+a\s*m[aá]s\s*de\s*89\s*d[ií]as\b|^\s*90\+\b|^>89\b/i, start, end);
+    const rating   = pickRating(start, end);
 
-    let vigente = 0;
-    let m = seg.match(BEFORE_VIG);
-    if (m?.[1] && !isYear(m[1])) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
-    if (!vigente) {
-      m = seg.match(AFTER_VIG);
-      if (m?.[1] && !isYear(m[1])) { const v = toNumMiles(m[1]); if (Number.isFinite(v) && v > 0) vigente = v; }
-    }
-    if (!vigente) {
-      const nums = (seg.match(NUM_RE) || [])
-        .filter(x => !isYear(x))
-        .map(toNumMiles)
-        .filter(n => Number.isFinite(n) && n > 0 && n <= 1_000_000); // 1,000,000 miles = $1,000,000,000
-      if (nums.length) vigente = Math.max(...nums);
-    }
-
-    out.push({ month: months[k], vigente: vigente || 0, v1_29: 0, v30_59: 0, v60_89: 0, v90p: 0, rating: null });
+    out.push({
+      month,
+      vigente: vigente || 0,
+      v1_29:   v1_29 || 0,
+      v30_59:  v30_59 || 0,
+      v60_89:  v60_89 || 0,
+      v90p:    v90p || 0,
+      rating:  rating || null
+    });
   }
 
+  // Últimos 12 en orden cronológico
   out.sort((a, b) => compareMonthTok(a.month, b.month));
   return { rows: out.slice(-12), historiaRaw: bloque };
 }
