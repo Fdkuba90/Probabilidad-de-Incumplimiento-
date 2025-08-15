@@ -1,4 +1,4 @@
-// pages/index.js — UI mínima para probar
+// pages/index.js — UI robusta: maneja respuestas no-JSON sin romper
 import { useState } from "react";
 
 export default function Home() {
@@ -7,6 +7,14 @@ export default function Home() {
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
 
+  function safeParseJSON(text) {
+    if (!text) return null;
+    // intenta detectar JSON rápido (empieza con { o [)
+    const t = text.trim();
+    if (!t || !/^[{\[]/.test(t)) return null;
+    try { return JSON.parse(t); } catch { return null; }
+  }
+
   async function handleSend() {
     setErr("");
     setRes(null);
@@ -14,10 +22,25 @@ export default function Home() {
       const fd = new FormData();
       if (file) fd.append("file", file);
       fd.append("udi", udi);
+
       const r = await fetch("/api/analyzePdf", { method: "POST", body: fd });
-      const data = await r.json(); // siempre devuelve JSON (aunque haya error)
-      if (!r.ok) throw new Error(data?.error || "Error");
-      setRes(data);
+
+      // lee SIEMPRE como texto primero
+      const text = await r.text();
+      const maybeJson = safeParseJSON(text);
+
+      if (!r.ok) {
+        // si vino JSON con {error: ...}, úsalo; si no, muestra el texto crudo
+        const msg = maybeJson?.error || text || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
+
+      if (maybeJson) {
+        setRes(maybeJson);
+      } else {
+        // éxito sin JSON (no debería pasar, pero no truena la UI)
+        setRes({ raw: text });
+      }
     } catch (e) {
       setErr(String(e?.message || e));
     }
@@ -34,7 +57,7 @@ export default function Home() {
         <button onClick={handleSend}>Analizar PDF</button>
       </div>
 
-      {err && <p style={{ color: "crimson" }}>{err}</p>}
+      {err && <p style={{ color: "crimson", whiteSpace: "pre-wrap" }}>{err}</p>}
 
       {res && (
         <div style={{ marginTop: 24 }}>
