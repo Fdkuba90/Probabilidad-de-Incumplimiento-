@@ -192,7 +192,7 @@ function parseHistoriaTexto(fullText) {
       vigente: takeNum(/^\s*Vigente\b/i, s, e),
       v1_29:   takeNum(/^\s*Vencido\s+de\s+1\s*a\s*29\s*d[ií]as\b/i, s, e),
       v30_59:  takeNum(/^\s*Vencido\s+de\s+30\s*a\s*59\s*d[ií]as\b/i, s, e),
-      v60_89:  takeNum(/^\s*Vencido\s+de\s+60\s*a\s*89\s*d[ií]as\b/i, s, e),
+      v60_89:  takeNum(/^\s*Vencido\s+de\s*60\s*a\s*89\s*d[ií]as\b/i, s, e),
       v90p:    takeNum(/^\s*Vencido\s+a\s*m[aá]s\s*de\s*89\s*d[ií]as\b|^\s*90\+\b|^>\s*89\b/i, s, e),
       rating:  takeRating(s, e)
     });
