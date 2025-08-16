@@ -1,7 +1,3 @@
-export const config = {
-  api: { bodyParser: true },
-};
-
 export default function handler(req, res) {
   if (req.method === "OPTIONS") {
     res.setHeader("Allow", "OPTIONS, POST");
