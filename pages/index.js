@@ -18,12 +18,16 @@ export default function Home() {
 
       const res = await fetch("/api/analyzePdf", {
         method: "POST",
-        body: fd, // ← multipart/form-data (NO content-type manual)
+        body: fd,
       });
 
       const text = await res.text();
       let data;
-      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { raw: text };
+      }
 
       if (!res.ok) {
         throw new Error(data?.error || `HTTP ${res.status}`);
@@ -45,24 +49,16 @@ export default function Home() {
   }
 
   return (
-    <div style={{ maxWidth: 1100, margin: "40px auto", fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif" }}>
+    <div style={{ maxWidth: 900, margin: "40px auto", fontFamily: "Arial" }}>
       <h1>Analizador de Buró – Sección Califica</h1>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", margin: "16px 0 8px" }}>
-        <input
-          type="file"
-          accept="application/pdf"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
-        />
-        <span style={{ opacity: 0.7 }}>{file?.name || "Ningún archivo seleccionado"}</span>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", margin: "16px 0" }}>
+        <input type="file" accept="application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        <span>{file?.name || "Ningún archivo seleccionado"}</span>
 
         <label>
           &nbsp;UDI:&nbsp;
-          <input
-            value={udi}
-            onChange={(e) => setUdi(e.target.value)}
-            style={{ width: 100 }}
-          />
+          <input value={udi} onChange={(e) => setUdi(e.target.value)} style={{ width: 100 }} />
         </label>
 
         <button onClick={analizarPDF}>Analizar PDF</button>
@@ -70,14 +66,12 @@ export default function Home() {
       </div>
 
       {error && (
-        <pre style={{ background: "#fff2f2", color: "#b00020", padding: 12, borderRadius: 8 }}>
-{error}
-        </pre>
+        <pre style={{ background: "#ffe6e6", color: "#b00020", padding: 12, borderRadius: 6 }}>{error}</pre>
       )}
 
       {output && (
-        <pre style={{ background: "#f6f8fa", padding: 12, borderRadius: 8, whiteSpace: "pre-wrap" }}>
-{JSON.stringify(output, null, 2)}
+        <pre style={{ background: "#f6f8fa", padding: 12, borderRadius: 6, whiteSpace: "pre-wrap" }}>
+          {JSON.stringify(output, null, 2)}
         </pre>
       )}
     </div>
