@@ -1,4 +1,3 @@
-// UI simple + robusta: siempre lee respuesta como texto y parsea JSON solo si aplica
 import { useState } from "react";
 
 export default function Home() {
@@ -32,7 +31,6 @@ export default function Home() {
     }
   }
 
-  // Botón de prueba rápida del backend
   async function ping() {
     setErr(""); setRes(null);
     const r = await fetch("/api/ping", { method: "POST" });
@@ -47,7 +45,7 @@ export default function Home() {
         <input type="file" accept="application/pdf" onChange={(e)=>setFile(e.target.files?.[0] || null)} />
         <label>UDI:&nbsp;<input value={udi} onChange={e=>setUdi(e.target.value)} style={{ width: 100 }}/></label>
         <button onClick={handleSend}>Analizar PDF</button>
-        <button onClick={ping} title="Probar backend">Probar API</button>
+        <button onClick={ping}>Probar API</button>
       </div>
 
       {err && <p style={{ color: "crimson", whiteSpace: "pre-wrap" }}>{err}</p>}
