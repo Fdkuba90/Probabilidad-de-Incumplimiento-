@@ -184,7 +184,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, method: "OPTIONS" });
   }
 
-  // Para otros métodos, no 405 para no confundir
+  // Para otros métodos, mensaje claro (evita 405 confuso)
   if (req.method !== "POST") {
     res.setHeader("Allow", "OPTIONS, POST");
     return res.status(200).json({ ok: true, info: "Usa POST con multipart/form-data", method: req.method });
