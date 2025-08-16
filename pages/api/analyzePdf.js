@@ -1,4 +1,4 @@
-// pages/api/analyzePdf.js — API robusta: POST multipart con formidable, OCR + fallback texto, puntaje y PI
+// pages/api/analyzePdf.js — acepta OPTIONS (preflight) y POST con FormData
 export const runtime = "nodejs";
 
 import formidable from "formidable";
@@ -8,24 +8,19 @@ import { parseCalificaFromText } from "../../lib/parseCalifica";
 import { parseHistoriaFromText } from "../../lib/parseHistoria";
 import { extractHistoriaOCR } from "../../lib/ocrHistoria";
 
-// Necesario para subir PDF por multipart/form-data con formidable
+// Necesario para formidable (subida de archivos)
 export const config = {
   api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
 };
 
-// ===== utilidades =====
+// ===== utilidades breves =====
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 const clamp01 = (x) => (x == null ? null : Math.max(0, Math.min(1, x)));
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 function normalizeText(text = "") {
-  return (text || "")
-    .replace(/\u00A0/g, " ")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, "\n")
-    .trim();
+  return (text || "").replace(/\u00A0/g, " ").replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n").trim();
 }
 function parseNumLoose(v) {
   if (v == null) return null;
@@ -45,8 +40,6 @@ function sliceBetween(txt, fromReList, toReList) {
   for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
   return rest;
 }
-
-// ===== Totales de Activos =====
 function parseResumenActivosRobusto(text) {
   const fromReList = [
     /Resumen\s*(de)?\s*Cr[eé]ditos?\s+Activos?/i,
@@ -100,8 +93,6 @@ function parseResumenActivosRobusto(text) {
   const vencido  = (typeof saldo === "number" && typeof vigente === "number") ? Math.max(0, saldo - vigente) : null;
   return { totalOriginalPesos: original, totalSaldoActualPesos: saldo, totalVigentePesos: vigente, totalVencidoPesos: vencido };
 }
-
-// ===== Historia por TEXTO (fallback si OCR no devuelve nada) =====
 function parseHistoriaTexto(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -151,8 +142,6 @@ function parseHistoriaTexto(fullText) {
   rows.sort((a,b)=>{ const [ma,ya]=(a.month||"").split(/\s+/),[mb,yb]=(b.month||"").split(/\s+/); return (ya-yb)||(ORDER.indexOf(ma)-ORDER.indexOf(mb)); });
   return { rows: rows.slice(-12), historiaRaw: bloque };
 }
-
-// ===== Scoring / PI =====
 function puntuar(val, flags) {
   const pts = {}; const miss = (v)=> v==null || v==="--" || (typeof v==="number" && !Number.isFinite(v));
   if (!miss(val[1])) pts[1] = val[1]===0?62 : val[1]<=3?50 : val[1]<=7?41 : 16; else { pts[1]=0; flags.push({id:1,tipo:"sin_info"}); }
@@ -175,9 +164,16 @@ function detectaSinHistorial({ valores, historyMonthly, resumen }) {
 
 // ===== Handler =====
 export default async function handler(req, res) {
-  // Si alguien hace GET, respondemos JSON informativo (no 405) para evitar confusiones
+  // ✅ Acepta preflight CORS/Fetch
+  if (req.method === "OPTIONS") {
+    res.setHeader("Allow", "OPTIONS, POST");
+    return res.status(200).json({ ok: true, method: "OPTIONS" });
+  }
+
+  // Para GET u otros, mensaje informativo (no 405 para evitar confusión)
   if (req.method !== "POST") {
-    return res.status(200).json({ ok: true, info: "Usa POST con multipart/form-data", method: req.method, endpoint: "/api/analyzePdf" });
+    res.setHeader("Allow", "OPTIONS, POST");
+    return res.status(200).json({ ok: true, info: "Usa POST con multipart/form-data", method: req.method });
   }
 
   try {
@@ -232,11 +228,10 @@ export default async function handler(req, res) {
     }
 
     if (!historyMonthly.length) {
-      // Fallback 1: texto dentro de “Historia:”
       const { rows, historiaRaw: raw } = parseHistoriaTexto(text);
       historyMonthly = Array.isArray(rows) ? rows : [];
       if (!historiaRaw) historiaRaw = raw || "";
-      // Fallback 2: si tienes tu lib/parseHistoria.js personalizada
+
       if (!historyMonthly.length) {
         const fromLib = parseHistoriaFromText(text);
         if (fromLib?.filas?.length) {
