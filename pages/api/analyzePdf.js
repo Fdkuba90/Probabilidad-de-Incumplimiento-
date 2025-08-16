@@ -1,4 +1,4 @@
-// API robusta: solo POST, siempre JSON, acepta PDF, hace OCR/fallback y calcula PI
+// API tolerante: siempre JSON y sin 405; procesa en POST y en otros métodos muestra debug
 export const runtime = "nodejs";
 
 import formidable from "formidable";
@@ -7,12 +7,12 @@ import { readFile } from "fs/promises";
 import { parseCalificaFromText } from "../../lib/parseCalifica";
 import { extractHistoriaOCR } from "../../lib/ocrHistoria";
 
-/** Next API config: formidable requiere desactivar bodyParser */
+// ⚠️ Necesario para subir archivos con formidable
 export const config = {
   api: { bodyParser: false, sizeLimit: "25mb", externalResolver: true },
 };
 
-// ===== Utilidades =====
+// ----------------- utilidades -----------------
 const PUNTOS_BASE = 285;
 const DEFAULT_UDI = 8.1462;
 
@@ -20,7 +20,12 @@ const clamp01 = (x) => (x == null ? null : Math.max(0, Math.min(1, x)));
 const toPesosMiles = (n) => (n == null ? null : Math.round(n * 1000));
 
 function normalizeText(text = "") {
-  return (text || "").replace(/\u00A0/g, " ").replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n").trim();
+  return (text || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
 }
 function parseNumLoose(v) {
   if (v == null) return null;
@@ -40,8 +45,6 @@ function sliceBetween(txt, fromReList, toReList) {
   for (const re of toReList) { const j = rest.search(re); if (j !== -1) return rest.slice(0, j); }
   return rest;
 }
-
-// ===== Resumen de Activos =====
 function parseResumenActivosRobusto(text) {
   const fromReList = [
     /Resumen\s*(de)?\s*Cr[eé]ditos?\s+Activos?/i,
@@ -95,8 +98,6 @@ function parseResumenActivosRobusto(text) {
   const vencido  = (typeof saldo === "number" && typeof vigente === "number") ? Math.max(0, saldo - vigente) : null;
   return { totalOriginalPesos: original, totalSaldoActualPesos: saldo, totalVigentePesos: vigente, totalVencidoPesos: vencido };
 }
-
-// ===== Parser de Historia por texto (fallback si OCR no da nada) =====
 function parseHistoriaTexto(fullText) {
   const bloque = sliceBetween(
     fullText,
@@ -146,8 +147,6 @@ function parseHistoriaTexto(fullText) {
   rows.sort((a,b)=>{ const [ma,ya]=(a.month||"").split(/\s+/),[mb,yb]=(b.month||"").split(/\s+/); return (ya-yb)||(ORDER.indexOf(ma)-ORDER.indexOf(mb)); });
   return { rows: rows.slice(-12), historiaRaw: bloque };
 }
-
-// ===== Scoring & PI =====
 function puntuar(val, flags) {
   const pts = {}; const miss = (v)=> v==null || v==="--" || (typeof v==="number" && !Number.isFinite(v));
   if (!miss(val[1])) pts[1] = val[1]===0?62 : val[1]<=3?50 : val[1]<=7?41 : 16; else { pts[1]=0; flags.push({id:1,tipo:"sin_info"}); }
@@ -168,11 +167,12 @@ function detectaSinHistorial({ valores, historyMonthly, resumen }) {
   return tot0 && meses0 && sinInfo;
 }
 
-// ===== Handler =====
+// ----------------- handler -----------------
 export default async function handler(req, res) {
-  // Permitir OPTIONS si algún navegador lo envía
-  if (req.method === "OPTIONS") { res.setHeader("Allow", ["POST"]); return res.status(200).json({ ok: true }); }
-  if (req.method !== "POST") { res.setHeader("Allow", ["POST"]); return res.status(405).json({ error: `Método ${req.method} no permitido` }); }
+  // En lugar de 405, devolvemos un JSON informativo cuando no sea POST.
+  if (req.method !== "POST") {
+    return res.status(200).json({ ok: true, info: "Usa POST para analizar PDF", method: req.method, endpoint: "/api/analyzePdf" });
+  }
 
   try {
     // 1) multipart/form-data
@@ -184,7 +184,7 @@ export default async function handler(req, res) {
     const file = files?.file?.[0] || files?.file;
     if (!file?.filepath) return res.status(400).json({ error: "No se recibió archivo" });
 
-    // 2) PDF -> texto base
+    // 2) PDF -> texto
     const buffer = await readFile(file.filepath);
     const parsed = await pdfParse(buffer).catch(e => { throw new Error("No se pudo leer el PDF: " + (e?.message || e)); });
     const text = normalizeText(parsed?.text || "");
@@ -211,7 +211,7 @@ export default async function handler(req, res) {
     // 4) Totales
     const resumen = parseResumenActivosRobusto(text);
 
-    // 5) Historia: OCR + fallback texto
+    // 5) Historia OCR + fallback
     const flags = [];
     let historyMonthly = [];
     let historiaRaw = "";
@@ -232,7 +232,7 @@ export default async function handler(req, res) {
       flags.push({ tipo: "historia_fallback_texto", detalle: `Filas: ${historyMonthly.length}` });
     }
 
-    // 6) Orden y límite 12
+    // 6) Orden y últimos 12
     const ORDER = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
     historyMonthly.sort((a,b)=>{ const [ma,ya]=(a.month||"").split(/\s+/),[mb,yb]=(b.month||"").split(/\s+/); return (ya-yb)||(ORDER.indexOf(ma)-ORDER.indexOf(mb)); });
     historyMonthly = historyMonthly.slice(-12);
