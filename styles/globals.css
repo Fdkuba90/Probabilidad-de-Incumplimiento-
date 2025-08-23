@@ -1,0 +1,139 @@
+/* -------- Base -------- */
+* { box-sizing: border-box; }
+html, body { padding: 0; margin: 0; }
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  color: #0f172a;
+  background: #f6f8fb;
+  line-height: 1.5;
+}
+a { color: inherit; text-decoration: none; }
+img { display: block; max-width: 100%; height: auto; }
+
+/* -------- Layout -------- */
+.container { max-width: 1120px; margin: 0 auto; padding: 24px 20px 40px; }
+
+/* Header */
+.header { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+.logo { height: 54px; width: auto; }
+.title { font-weight: 800; letter-spacing: -0.01em; font-size: 28px; margin: 0; }
+
+/* Panel */
+.panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px 18px; margin: 12px 0 18px; }
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.udi { width: 240px; }
+
+/* Inputs & select */
+input[type="number"], select {
+  padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 8px; background: #fff;
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+input[type="number"]:focus, select:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+
+/* Button */
+button {
+  appearance: none; border: 0; background: #0b1220; color: #fff;
+  padding: 10px 14px; border-radius: 10px; font-weight: 600; cursor: pointer;
+  transition: transform .02s, background .15s, box-shadow .15s;
+  box-shadow: 0 1px 1px rgba(16,24,40,.06), 0 1px 2px rgba(16,24,40,.08);
+}
+button:hover { background: #0a0f1b; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .6; cursor: default; }
+
+/* Error */
+.error { margin: 10px 0 0; padding: 8px 12px; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 8px; }
+
+/* -------- Cards -------- */
+.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px 18px; margin: 12px 0; }
+.card h3 { margin: 0 0 10px; font-size: 16px; color: #0b1220; }
+.big { font-size: 20px; font-weight: 700; letter-spacing: .2px; margin: 6px 0 0; }
+.badge { font-size: 28px; font-weight: 800; letter-spacing: -.02em; margin: 6px 0 2px; }
+.note { font-size: 12px; color: #6b7280; }
+
+/* Grid para score/PI */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(240px,1fr)); gap: 14px; }
+
+/* Summary (Créditos Activos) */
+.summary { display: grid; grid-template-columns: repeat(4, minmax(180px,1fr)); gap: 12px; }
+.summary > div { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; }
+.summary span { display: block; color: #475569; font-size: 12px; margin-bottom: 4px; }
+.summary strong { font-size: 18px; }
+
+/* Tabla Indicadores */
+.table { width: 100%; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+.table .thead, .table .tr { display: grid; grid-template-columns: 80px 1fr 160px 120px; align-items: center; }
+.table .thead { background: #eef2f7; font-weight: 700; color: #0b1220; }
+.table .thead > div { padding: 12px 14px; border-bottom: 1px solid #e5e7eb; }
+.table .tbody .tr > div { padding: 12px 14px; border-top: 1px solid #eef2f7; }
+.table .code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 13px; color: #0b1220; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.table .center { text-align: center; }
+.right { text-align: right; }
+
+/* -------- Responsive -------- */
+@media (max-width: 920px) {
+  .grid { grid-template-columns: 1fr; }
+  .summary { grid-template-columns: repeat(2, minmax(160px,1fr)); }
+}
+@media (max-width: 600px) {
+  .summary { grid-template-columns: 1fr; }
+  .table .thead, .table .tr { grid-template-columns: 60px 1fr 120px 90px; }
+  .title { font-size: 22px; }
+}
+
+/* -------- Print (PDF) — compacto para 1 hoja -------- */
+@media print {
+  @page { size: A4; margin: 6mm; }
+  body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .no-print { display: none !important; }
+  .container { max-width: none; padding: 0; }
+
+  /* Escala global (ajusta si hace falta: 0.72–0.78) */
+  .print-fit {
+    transform: scale(0.82);
+    transform-origin: top left;
+    width: calc(100% / 0.82);
+  }
+
+  /* Compactar espacios/tipografías para ganar altura */
+  .header { margin: 3mm 0 2mm; }
+  .title { font-size: 20px; }
+  .big { font-size: 16px; }
+  .badge { font-size: 20px; }
+  .note { display: none !important; }  /* ahorra espacio */
+
+  /* Cards: por defecto no se parten */
+  .card {
+    border: 0; box-shadow: none;
+    padding: 8px 10px;
+    margin: 4px 0;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .card:last-child { margin-bottom: 0; }
+
+  /* ✅ EXCEPCIÓN: permitir que el card de la TABLA inicie en la hoja anterior */
+  .card.card-table {
+    margin-top: 0 !important;
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+  /* No cortar filas */
+  .card.card-table .tbody .tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Tabla más compacta */
+  .table .thead,
+  .table .tr {
+    grid-template-columns: 60px 1fr 120px 90px;
+  }
+  .table .thead > div { padding: 4px 6px; font-size: 12px; }
+  .table .tbody .tr > div { padding: 4px 6px; font-size: 10.5px; line-height: 1.2; }
+  .table .code { font-size: 10.5px; }
+
+  /* Tarjetas de resumen aún más compactas */
+  .summary { gap: 6px; }
+  .summary > div { padding: 6px 8px; }
+}

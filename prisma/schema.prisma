@@ -1,0 +1,20 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PRISMA_DATABASE_URL")
+}
+
+model Cliente {
+  id           String   @id @default(uuid())
+  nombre       String
+  rfc          String   @unique
+  calificacion Decimal  @db.Decimal(6, 2)   // Puntaje total
+  pi           Decimal  @db.Decimal(6, 4)   // Probabilidad de incumplimiento (0–1)
+  updatedAt    DateTime @updatedAt @default(now())
+}
+

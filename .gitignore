@@ -1,0 +1,8 @@
+# No subir dependencias ni archivos generados
+node_modules/
+.next/
+
+# No subir secretos
+.env
+.env.local
+
