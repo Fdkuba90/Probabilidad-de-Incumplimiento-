@@ -258,7 +258,7 @@ export default async function handler(req, res) {
     idsTabla.forEach(r => { r.puntaje = scored?.pts?.[r.id] ?? null; });
 
     // === OVERRIDES ESPECIALES ===
-    // ID 9 con "--"/"Sin Información" => puntaje -19 (solo aplica en metodología sin atrasos)
+    // ID 9 con "--"/"Sin Información" => puntaje -19 (solo metodología sin atrasos)
     if (metodo === "sin") {
       const row9 = idsTabla.find(r => r.id === 9);
       if (row9 && (row9.valor === "Sin Información" || String(row9.valor).trim() === "--")) {
@@ -268,7 +268,7 @@ export default async function handler(req, res) {
         puntajeTotal = puntajeTotal - prev + (-19);
       }
     }
-    // ID 1 y ID 14 con "--"/"Sin Información" => puntaje 53 (aplica en cualquier metodología)
+    // ID 1 y ID 14 con "--"/"Sin Información" => puntaje 53 (en cualquier metodología)
     for (const forcedId of [1, 14]) {
       const rowX = idsTabla.find(r => r.id === forcedId);
       if (rowX && (rowX.valor === "Sin Información" || String(rowX.valor).trim() === "--")) {
@@ -276,6 +276,16 @@ export default async function handler(req, res) {
         rowX.valor = "Sin Información";
         rowX.puntaje = 53;
         puntajeTotal = puntajeTotal - prev + 53;
+      }
+    }
+    // NUEVO: ID 17 con "--"/"Sin Información" => puntaje 58
+    {
+      const row17 = idsTabla.find(r => r.id === 17);
+      if (row17 && (row17.valor === "Sin Información" || String(row17.valor).trim() === "--")) {
+        const prev = scored?.pts?.[17] ?? 0;
+        row17.valor = "Sin Información";
+        row17.puntaje = 58;
+        puntajeTotal = puntajeTotal - prev + 58;
       }
     }
     // ============================
