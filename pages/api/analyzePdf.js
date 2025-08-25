@@ -91,7 +91,7 @@ async function extractCalificadorRows(pdfBuffer) {
     const hasHeads = !!(idHead && codeHead && valHead);
 
     // Agrupar por línea
-    const yTol = hasHeads ? 0.7 : 1.8; // más estricto si hay encabezados
+    const yTol = hasHeads ? 0.7 : 1.8;
     const lines = [];
     for (const tk of raw) {
       if (/DOCUMENTO\s+SIN\s+VALOR|P[ÁA]GINA\s+\d+/i.test(tk.s)) continue;
@@ -100,7 +100,6 @@ async function extractCalificadorRows(pdfBuffer) {
       line.cells.push({ x: tk.x, y: tk.y, s: tk.s });
     }
 
-    // Si hay encabezados, construir bandas de columna y limitar a líneas debajo
     const minY = hasHeads ? Math.min(idHead.y, codeHead.y, valHead.y) + 0.5 : -Infinity;
     let midIdCode = null, midCodeVal = null;
     if (hasHeads) {
@@ -113,7 +112,6 @@ async function extractCalificadorRows(pdfBuffer) {
       const cells = ln.cells.sort((a, b) => a.x - b.x);
 
       if (hasHeads) {
-        // 1) método por bandas
         const bandId    = cells.filter(c => c.x <  midIdCode);
         const bandCode  = cells.filter(c => c.x >= midIdCode && c.x < midCodeVal);
         const bandValue = cells.filter(c => c.x >= midCodeVal);
@@ -121,7 +119,6 @@ async function extractCalificadorRows(pdfBuffer) {
         const idTk   = pickNearest(bandId,   idHead.x,   (s) => isIdToken(s));
         const codeTk = pickNearest(bandCode, codeHead.x, (s) => isCodeToken(s));
 
-        // Valor: dentro de la banda de valor; permitir números, "--", "-", "N/A", "Sin Información"
         let valTk = pickNearest(
           bandValue,
           valHead.x,
@@ -131,10 +128,8 @@ async function extractCalificadorRows(pdfBuffer) {
             /^(Sin|Información)$/i.test(s)
         );
 
-        // Unir “Sin Información” si viene partido
         let value = valTk?.s ?? null;
         if (!value) {
-          // último intento dentro de banda valor: rightmost válido
           const rightMost = [...bandValue].reverse().find(c =>
             isNumberLike(c.s) || c.s === "--" || c.s === "-" ||
             /^N\/?A\.?$/i.test(c.s) || /^N\.A\.?$/i.test(c.s)
@@ -147,9 +142,7 @@ async function extractCalificadorRows(pdfBuffer) {
           }
         }
 
-        // Normalizaciones y guardas
         if (value === "--" || value === "-" || /^N\/?A\.?$/i.test(value) || /^N\.A\.?$/i.test(value)) value = "Sin Información";
-        // no aceptar que el "valor" sea igual al ID
         if (idTk && value && String(value).trim() === String(idTk.s).trim()) value = null;
 
         if (idTk && codeTk && value != null) {
@@ -160,10 +153,9 @@ async function extractCalificadorRows(pdfBuffer) {
             continue;
           }
         }
-        // si falló, caer al fallback
       }
 
-      // 2) Fallback: detectar “ID CÓDIGO ... valor(derecha)”
+      // Fallback
       const tokens = cells.flatMap(c => c.s.split(/\s+/)).filter(Boolean);
       if (tokens.length < 3) continue;
 
@@ -188,13 +180,12 @@ async function extractCalificadorRows(pdfBuffer) {
         if (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, ""))) { value = t; break; }
       }
       if (!value) continue;
-      if (String(value).trim() === String(id)) continue; // evita que el ID se use como valor
+      if (String(value).trim() === String(id)) continue;
 
       out.push({ id, codigo: code, valorRaw: value });
     }
   }
 
-  // Deduplicar por ID (preferimos la primera ocurrencia —por columnas suele salir primero—)
   const seen = new Set();
   return out.filter(r => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
@@ -219,7 +210,7 @@ export default async function handler(req, res) {
     // 1) Parse general
     const parsed = await parsePdf(pdfBuffer);
 
-    // 2) Indicadores (todas las páginas, por columnas si hay encabezados)
+    // 2) Indicadores
     let calRows = await extractCalificadorRows(pdfBuffer);
 
     // 3) Fallback: fusionar si quedó corto
@@ -267,10 +258,25 @@ export default async function handler(req, res) {
       val._udis = udi > 0 ? maxCredit / udi : 0;
     }
 
-    // Puntaje y PI
+    // Puntaje base y PI
     const scored = metodo === "con" ? puntuarConAtrasos(val) : puntuarSinAtrasos(val);
-    const puntajeTotal = scored.puntajeTotal;
+    let puntajeTotal = scored.puntajeTotal;
+
+    // asignar puntajes a la tabla
     idsTabla.forEach(r => { r.puntaje = scored?.pts?.[r.id] ?? null; });
+
+    // === OVERRIDE ESPECIAL: ID 9 con "--" => "Sin Información" y puntaje -19 ===
+    if (metodo === "sin") {
+      const row9 = idsTabla.find(r => r.id === 9);
+      if (row9 && (row9.valor === "Sin Información" || String(row9.valor).trim() === "--")) {
+        const prev = scored?.pts?.[9] ?? 0;
+        row9.valor = "Sin Información";
+        row9.puntaje = -19;
+        puntajeTotal = puntajeTotal - prev + (-19);
+      }
+    }
+    // ==========================================================================
+
     const pi = calcularPI(puntajeTotal);
 
     // Totales y buckets
