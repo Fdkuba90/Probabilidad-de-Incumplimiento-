@@ -3,7 +3,6 @@ import { promises as fs } from "fs";
 import formidable from "formidable";
 import { parsePdf } from "../../lib/parser";
 import { puntuarSinAtrasos, puntuarConAtrasos, calcularPI } from "../../lib/scoring";
-import { prisma } from "../../lib/prisma";
 
 /** Mapeo fijo de Código por ID para mostrar en la tabla */
 const CODIGO_POR_ID = {
@@ -41,16 +40,34 @@ function normInfo(v) {
   if (s === "" || s === "--" || s === "-") return "Sin Información";
   return v;
 }
-
 const ALL_CODES = new Set(Object.values(CODIGO_POR_ID));
 const IDS_WANTED = new Set(Object.keys(CODIGO_POR_ID).map(Number));
+const isIdToken = (t) => /^\d{1,3}$/.test(t);
+const isCodeToken = (t) => /^[A-Z0-9_]{2,}$/.test(t);
+const isNumberLike = (t) => /^-?\d{1,3}(?:,\d{3})*(?:\.\d+)?$|^-?\d+(?:\.\d+)?$/.test(t);
 
-/** ============ Coordenadas para “Calificador” (pdf2json) ============ */
+/** util para escoger el token más cercano a una X dada con un predicado */
+function pickNearest(tokens, xRef, pred) {
+  let best = null, bestDx = Infinity;
+  for (const tk of tokens) {
+    if (!pred(tk.s)) continue;
+    const dx = Math.abs(tk.x - xRef);
+    if (dx < bestDx) { bestDx = dx; best = tk; }
+  }
+  return best;
+}
+
+/**
+ * Extrae filas ID–CÓDIGO–VALOR:
+ * 1) Si encuentra encabezados “Identificador… / Código… / Valor…”, usa sus X
+ *    y toma por cada renglón el token más cercano dentro de cada BANDA de columna.
+ * 2) Si no hay encabezados, cae al método “derecha→izquierda” como fallback.
+ */
 async function extractCalificadorRows(pdfBuffer) {
   let PDFParserMod = null;
-  try { PDFParserMod = await import("pdf2json"); } catch { return []; }
+  try { PDFParserMod = await import("pdf2json"); } catch { return null; }
   const PDFParser = PDFParserMod.default || PDFParserMod.PDFParser || PDFParserMod;
-  if (!PDFParser) return [];
+  if (!PDFParser) return null;
 
   const pdfParser = new PDFParser();
   const data = await new Promise((resolve, reject) => {
@@ -67,49 +84,123 @@ async function extractCalificadorRows(pdfBuffer) {
       .map(t => ({ x: t.x, y: t.y, s: (t.R && t.R[0] && dec(t.R[0].T)) || "" }))
       .filter(tk => tk.s && !/^\W+$/.test(tk.s));
 
-    // Encabezados (flex)
-    const idHead   = raw.find(t => /Identificador/i.test(t.s));
-    const codeHead = raw.find(t => /C[oó]digo/i.test(t.s));
-    const valHead  = raw.find(t => /Valor/i.test(t.s));
+    // Detectar encabezados y sus X
+    const idHead   = raw.find(t => /Identificador\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
+    const codeHead = raw.find(t => /C[óo]digo\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
+    const valHead  = raw.find(t => /Valor\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
     const hasHeads = !!(idHead && codeHead && valHead);
 
-    // Agrupar por renglón
-    const yTol = hasHeads ? 0.7 : 1.8;
+    // Agrupar por línea
+    const yTol = hasHeads ? 0.7 : 1.8; // más estricto si hay encabezados
     const lines = [];
     for (const tk of raw) {
+      if (/DOCUMENTO\s+SIN\s+VALOR|P[ÁA]GINA\s+\d+/i.test(tk.s)) continue;
       let line = lines.find(l => Math.abs(l.y - tk.y) <= yTol);
       if (!line) { line = { y: tk.y, cells: [] }; lines.push(line); }
       line.cells.push({ x: tk.x, y: tk.y, s: tk.s });
     }
 
+    // Si hay encabezados, construir bandas de columna y limitar a líneas debajo
+    const minY = hasHeads ? Math.min(idHead.y, codeHead.y, valHead.y) + 0.5 : -Infinity;
+    let midIdCode = null, midCodeVal = null;
+    if (hasHeads) {
+      midIdCode = (idHead.x + codeHead.x) / 2;
+      midCodeVal = (codeHead.x + valHead.x) / 2;
+    }
+
     for (const ln of lines) {
+      if (ln.y < minY) continue;
       const cells = ln.cells.sort((a, b) => a.x - b.x);
+
+      if (hasHeads) {
+        // 1) método por bandas
+        const bandId    = cells.filter(c => c.x <  midIdCode);
+        const bandCode  = cells.filter(c => c.x >= midIdCode && c.x < midCodeVal);
+        const bandValue = cells.filter(c => c.x >= midCodeVal);
+
+        const idTk   = pickNearest(bandId,   idHead.x,   (s) => isIdToken(s));
+        const codeTk = pickNearest(bandCode, codeHead.x, (s) => isCodeToken(s));
+
+        // Valor: dentro de la banda de valor; permitir números, "--", "-", "N/A", "Sin Información"
+        let valTk = pickNearest(
+          bandValue,
+          valHead.x,
+          (s) =>
+            isNumberLike(s) || s === "--" || s === "-" ||
+            /^N\/?A\.?$/i.test(s) || /^N\.A\.?$/i.test(s) ||
+            /^(Sin|Información)$/i.test(s)
+        );
+
+        // Unir “Sin Información” si viene partido
+        let value = valTk?.s ?? null;
+        if (!value) {
+          // último intento dentro de banda valor: rightmost válido
+          const rightMost = [...bandValue].reverse().find(c =>
+            isNumberLike(c.s) || c.s === "--" || c.s === "-" ||
+            /^N\/?A\.?$/i.test(c.s) || /^N\.A\.?$/i.test(c.s)
+          );
+          value = rightMost?.s ?? null;
+        } else {
+          const sinIdx = bandValue.findIndex(c => /^(Sin)$/i.test(c.s));
+          if (sinIdx >= 0 && bandValue[sinIdx + 1] && /^(Información)$/i.test(bandValue[sinIdx + 1].s)) {
+            value = "Sin Información";
+          }
+        }
+
+        // Normalizaciones y guardas
+        if (value === "--" || value === "-" || /^N\/?A\.?$/i.test(value) || /^N\.A\.?$/i.test(value)) value = "Sin Información";
+        // no aceptar que el "valor" sea igual al ID
+        if (idTk && value && String(value).trim() === String(idTk.s).trim()) value = null;
+
+        if (idTk && codeTk && value != null) {
+          const id = Number(idTk.s);
+          const code = codeTk.s;
+          if (IDS_WANTED.has(id) && ALL_CODES.has(code)) {
+            out.push({ id, codigo: code, valorRaw: value });
+            continue;
+          }
+        }
+        // si falló, caer al fallback
+      }
+
+      // 2) Fallback: detectar “ID CÓDIGO ... valor(derecha)”
       const tokens = cells.flatMap(c => c.s.split(/\s+/)).filter(Boolean);
       if (tokens.length < 3) continue;
 
-      // heurística: id, código y último token como valor
-      const id = Number(tokens[0]);
-      const code = tokens[1];
-      const value = tokens[tokens.length - 1];
-
-      if (IDS_WANTED.has(id) && ALL_CODES.has(code)) {
-        out.push({ id, codigo: code, valorRaw: value });
+      let iId = -1, iCode = -1;
+      for (let i = 0; i < Math.min(tokens.length - 2, 8); i++) {
+        if (isIdToken(tokens[i]) && isCodeToken(tokens[i + 1])) { iId = i; iCode = i + 1; break; }
       }
+      if (iId === -1) continue;
+
+      const id = Number(tokens[iId]);
+      const code = tokens[iCode];
+      if (!IDS_WANTED.has(id) || !ALL_CODES.has(code)) continue;
+
+      let value = null;
+      for (let j = tokens.length - 1; j > iCode; j--) {
+        const t = tokens[j];
+        if (t === "--" || t === "-") { value = "Sin Información"; break; }
+        if (/^N\/?A\.?$/i.test(t) || /^N\.A\.?$/i.test(t)) { value = "Sin Información"; break; }
+        if (t.toLowerCase() === "información" && j > iCode + 1 && tokens[j - 1].toLowerCase() === "sin") {
+          value = "Sin Información"; break;
+        }
+        if (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, ""))) { value = t; break; }
+      }
+      if (!value) continue;
+      if (String(value).trim() === String(id)) continue; // evita que el ID se use como valor
+
+      out.push({ id, codigo: code, valorRaw: value });
     }
   }
 
-  // Unicos por ID
+  // Deduplicar por ID (preferimos la primera ocurrencia —por columnas suele salir primero—)
   const seen = new Set();
   return out.filter(r => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
 
-/** ================================================================ */
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Método no permitido" }); 
-    return; 
-  }
+  if (req.method !== "POST") { res.status(405).json({ error: "Método no permitido" }); return; }
 
   try {
     const form = formidable({ multiples: false, keepExtensions: true, maxFileSize: 40 * 1024 * 1024 });
@@ -121,25 +212,30 @@ export default async function handler(req, res) {
     if (!uploaded?.filepath) return res.status(400).json({ error: "FILE_UPLOAD_NOT_FOUND" });
 
     const pdfBuffer = await fs.readFile(uploaded.filepath);
-    const metodo = String(fields.metodo || "sin").toLowerCase(); // "sin" | "con"
+    const udiInput = Array.isArray(fields.udi) ? fields.udi[0] : fields.udi;
+    const metodo = String(Array.isArray(fields.metodo) ? fields.metodo[0] : fields.metodo || "sin").toLowerCase(); // "sin" | "con"
+    const udi = toNumberOrNull(udiInput) || 0;
 
-    // 1) Parse general (incluye: texto normalizado, calificaRows por regex (Califica), totales, etc.)
+    // 1) Parse general
     const parsed = await parsePdf(pdfBuffer);
 
-    // 2) Intento por coordenadas (Calificador)
-    const rowsCoords = await extractCalificadorRows(pdfBuffer);
+    // 2) Indicadores (todas las páginas, por columnas si hay encabezados)
+    let calRows = await extractCalificadorRows(pdfBuffer);
 
-    // 3) Merge: preferimos coordenadas; si falta algún ID lo completamos con lo del parser (regex)
-    const rowsRegex = Array.isArray(parsed.calificaRows) ? parsed.calificaRows : [];
-    const map = new Map();
-    for (const r of rowsRegex) map.set(r.id, r);
-    for (const r of rowsCoords) map.set(r.id, r); // coord sobre-escribe regex
+    // 3) Fallback: fusionar si quedó corto
+    if (!Array.isArray(calRows)) calRows = [];
+    const base = parsed.calificaRows || [];
+    if (calRows.length < 8 && base.length) {
+      const map = new Map();
+      for (const r of calRows) map.set(r.id, r);
+      for (const r of base) if (!map.has(r.id) && IDS_WANTED.has(r.id) && ALL_CODES.has(r.codigo)) map.set(r.id, r);
+      calRows = Array.from(map.values());
+    }
+    if (calRows.length) parsed.calificaRows = calRows;
 
-    const rowsFinal = Array.from(map.values()).filter(r => IDS_WANTED.has(r.id));
-    parsed.calificaRows = rowsFinal;
-
-    // === Construir tabla y valores para puntaje ===
-    const mapById = new Map(rowsFinal.map(r => [r.id, r]));
+    // ---- Califica por metodología ----
+    const rows = parsed.calificaRows || [];
+    const mapById = new Map(rows.map(r => [r.id, r]));
     const idsNecesarios = (metodo === "con")
       ? [4, 5, 7, 12, 13, 14, 16]
       : [1, 6, 9, 11, 14, 15, 16, 17];
@@ -148,9 +244,27 @@ export default async function handler(req, res) {
     const idsTabla = [];
     for (const id of idsNecesarios) {
       const row = mapById.get(id);
-      const valorDisplay = normInfo(row?.valorRaw);
-      val[id] = toNumberOrNull(valorDisplay) ?? valorDisplay;
-      idsTabla.push({ id, codigo: CODIGO_POR_ID[id], valor: valorDisplay });
+      if (!row) {
+        val[id] = "Sin Información";
+        idsTabla.push({ id, codigo: CODIGO_POR_ID[id] || "", valor: "Sin Información" });
+        continue;
+      }
+      const valorDisplay = normInfo(row.valorRaw);
+      const valorNum = toNumberOrNull(valorDisplay);
+
+      if (metodo === "sin" ? (id === 6 || id === 11) : false) {
+        val[id] = valorDisplay === "Sin Información" ? "Sin Información" : (valorNum ?? "Sin Información");
+      } else {
+        val[id] = valorNum ?? (valorDisplay === "Sin Información" ? "Sin Información" : valorDisplay);
+      }
+      idsTabla.push({ id, codigo: CODIGO_POR_ID[id] || row.codigo || "", valor: valorDisplay });
+    }
+
+    // _udis para ID 15 (solo "sin atrasos")
+    if (metodo === "sin") {
+      const row15 = mapById.get(15);
+      const maxCredit = toNumberOrNull(row15?.valorRaw) || 0;
+      val._udis = udi > 0 ? maxCredit / udi : 0;
     }
 
     // Puntaje y PI
@@ -159,33 +273,38 @@ export default async function handler(req, res) {
     idsTabla.forEach(r => { r.puntaje = scored?.pts?.[r.id] ?? null; });
     const pi = calcularPI(puntajeTotal);
 
-    // Guardado automático en la base
-    try {
-      const nombre = parsed.razonSocial || "";
-      const rfc = parsed.rfc || "";
-      if (nombre && rfc) {
-        await prisma.cliente.upsert({
-          where: { rfc: String(rfc) },
-          update: { nombre, calificacion: String(puntajeTotal), pi: String(pi) },
-          create: { nombre, rfc, calificacion: String(puntajeTotal), pi: String(pi) },
-        });
-      }
-    } catch (e) {
-      console.error("Error guardando cliente en BD:", e);
-    }
+    // Totales y buckets
+    const unidad = parsed.milesDePesos ? "miles_de_pesos" : "pesos";
+    const t = parsed.totales || {};
+    const original   = t.original   ?? 0;
+    const vigente    = t.vigente    ?? 0;
+    const d1_29      = t.d1_29      ?? 0;
+    const d30_59     = t.d30_59     ?? 0;
+    const d60_89     = t.d60_89     ?? 0;
+    const d90_119    = t.d90_119    ?? 0;
+    const d120_179   = t.d120_179   ?? 0;
+    const d180_plus  = t.d180_plus  ?? 0;
+    const vencido    = Math.round(d1_29 + d30_59 + d60_89 + d90_119 + d120_179 + d180_plus);
+    const saldo      = Math.round(vigente + vencido);
 
     res.status(200).json({
       razonSocial: parsed.razonSocial || "",
       rfc: parsed.rfc || "",
       puntajeTotal,
       pi,
-      totales: parsed.totales || null,
-      califica: { ids: idsTabla.sort((a, b) => a.id - b.id) },
+      activosTotales: { original, saldo, vigente, vencido, d1_29, d30_59, d60_89, d90_119, d120_179, d180_plus, unidad },
+      califica: {
+        UDI: udi,
+        ids: idsTabla.sort((a, b) => a.id - b.id)
+      },
+      meta: {
+        metodologia: metodo,
+        puntosBase: scored.puntosBase,
+        debug: parsed._debug || null
+      }
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 }
-
-
