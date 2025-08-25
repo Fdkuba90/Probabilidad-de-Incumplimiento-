@@ -46,7 +46,6 @@ const isIdToken = (t) => /^\d{1,3}$/.test(t);
 const isCodeToken = (t) => /^[A-Z0-9_]{2,}$/.test(t);
 const isNumberLike = (t) => /^-?\d{1,3}(?:,\d{3})*(?:\.\d+)?$|^-?\d+(?:\.\d+)?$/.test(t);
 
-/** util para escoger el token más cercano a una X dada con un predicado */
 function pickNearest(tokens, xRef, pred) {
   let best = null, bestDx = Infinity;
   for (const tk of tokens) {
@@ -57,12 +56,7 @@ function pickNearest(tokens, xRef, pred) {
   return best;
 }
 
-/**
- * Extrae filas ID–CÓDIGO–VALOR:
- * 1) Si encuentra encabezados “Identificador… / Código… / Valor…”, usa sus X
- *    y toma por cada renglón el token más cercano dentro de cada BANDA de columna.
- * 2) Si no hay encabezados, cae al método “derecha→izquierda” como fallback.
- */
+/** Extrae ID–CÓDIGO–VALOR de todas las páginas (con o sin encabezados) */
 async function extractCalificadorRows(pdfBuffer) {
   let PDFParserMod = null;
   try { PDFParserMod = await import("pdf2json"); } catch { return null; }
@@ -84,13 +78,11 @@ async function extractCalificadorRows(pdfBuffer) {
       .map(t => ({ x: t.x, y: t.y, s: (t.R && t.R[0] && dec(t.R[0].T)) || "" }))
       .filter(tk => tk.s && !/^\W+$/.test(tk.s));
 
-    // Detectar encabezados y sus X
     const idHead   = raw.find(t => /Identificador\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
     const codeHead = raw.find(t => /C[óo]digo\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
     const valHead  = raw.find(t => /Valor\s+de\s+la\s+caracter[íi]stica/i.test(t.s));
     const hasHeads = !!(idHead && codeHead && valHead);
 
-    // Agrupar por línea
     const yTol = hasHeads ? 0.7 : 1.8;
     const lines = [];
     for (const tk of raw) {
@@ -262,10 +254,11 @@ export default async function handler(req, res) {
     const scored = metodo === "con" ? puntuarConAtrasos(val) : puntuarSinAtrasos(val);
     let puntajeTotal = scored.puntajeTotal;
 
-    // asignar puntajes a la tabla
+    // asignar puntajes calculados
     idsTabla.forEach(r => { r.puntaje = scored?.pts?.[r.id] ?? null; });
 
-    // === OVERRIDE ESPECIAL: ID 9 con "--" => "Sin Información" y puntaje -19 ===
+    // === OVERRIDES ESPECIALES ===
+    // ID 9 con "--"/"Sin Información" => puntaje -19 (solo aplica en metodología sin atrasos)
     if (metodo === "sin") {
       const row9 = idsTabla.find(r => r.id === 9);
       if (row9 && (row9.valor === "Sin Información" || String(row9.valor).trim() === "--")) {
@@ -275,7 +268,17 @@ export default async function handler(req, res) {
         puntajeTotal = puntajeTotal - prev + (-19);
       }
     }
-    // ==========================================================================
+    // ID 1 y ID 14 con "--"/"Sin Información" => puntaje 53 (aplica en cualquier metodología)
+    for (const forcedId of [1, 14]) {
+      const rowX = idsTabla.find(r => r.id === forcedId);
+      if (rowX && (rowX.valor === "Sin Información" || String(rowX.valor).trim() === "--")) {
+        const prev = scored?.pts?.[forcedId] ?? 0;
+        rowX.valor = "Sin Información";
+        rowX.puntaje = 53;
+        puntajeTotal = puntajeTotal - prev + 53;
+      }
+    }
+    // ============================
 
     const pi = calcularPI(puntajeTotal);
 
