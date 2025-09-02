@@ -62,6 +62,7 @@ function pickNearest(tokens, xRef, pred) {
  * 1) Si encuentra encabezados “Identificador… / Código… / Valor…”, usa sus X
  *    y toma por cada renglón el token más cercano dentro de cada BANDA de columna.
  * 2) Si no hay encabezados, cae al método “derecha→izquierda” como fallback.
+ *    (AQUÍ ES DONDE AHORA CAPTURA MÚLTIPLES TRIPLETES POR RENGLÓN)
  */
 async function extractCalificadorRows(pdfBuffer) {
   let PDFParserMod = null;
@@ -145,7 +146,6 @@ async function extractCalificadorRows(pdfBuffer) {
           }
         }
 
-        // Normalizaciones y guardas
         if (value === "--" || value === "-" || /^N\/?A\.?$/i.test(value) || /^N\.A\.?$/i.test(value)) value = "Sin Información";
         if (idTk && value && String(value).trim() === String(idTk.s).trim()) value = null;
 
@@ -161,32 +161,42 @@ async function extractCalificadorRows(pdfBuffer) {
       }
 
       // 2) Fallback: detectar “ID CÓDIGO ... valor(derecha)”
+      //    *** MODIFICADO: ahora captura MÚLTIPLES tripletes por renglón ***
       const tokens = cells.flatMap(c => c.s.split(/\s+/)).filter(Boolean);
       if (tokens.length < 3) continue;
 
-      let iId = -1, iCode = -1;
-      for (let i = 0; i < Math.min(tokens.length - 2, 8); i++) {
-        if (isIdToken(tokens[i]) && isCodeToken(tokens[i + 1])) { iId = i; iCode = i + 1; break; }
+      let k = 0;
+      while (k < tokens.length - 2) {
+        if (isIdToken(tokens[k]) && isCodeToken(tokens[k + 1])) {
+          const id = Number(tokens[k]);
+          const code = tokens[k + 1];
+
+          if (IDS_WANTED.has(id) && ALL_CODES.has(code)) {
+            let value = null;
+            let j = k + 2;
+            for (; j < tokens.length; j++) {
+              const t = tokens[j];
+              if (t === "--" || t === "-") { value = "Sin Información"; j++; break; }
+              if (/^N\/?A\.?$/i.test(t) || /^N\.A\.?$/i.test(t)) { value = "Sin Información"; j++; break; }
+              if (t.toLowerCase() === "información" && j > k + 2 && tokens[j - 1].toLowerCase() === "sin") {
+                value = "Sin Información"; j++; break;
+              }
+              if (isIdToken(t) && j + 1 < tokens.length && isCodeToken(tokens[j + 1])) {
+                // llegó otro ID+CODE sin valor claro para el anterior
+                break;
+              }
+              const tClean = t.replace(/[$%]/g, "");
+              if (isNumberLike(t) || isNumberLike(tClean)) { value = t; j++; break; }
+            }
+            if (value && String(value).trim() !== String(id)) {
+              out.push({ id, codigo: code, valorRaw: value });
+            }
+            k = j; // continuar después del valor hallado
+            continue;
+          }
+        }
+        k += 1;
       }
-      if (iId === -1) continue;
-
-      const id = Number(tokens[iId]);
-      const code = tokens[iCode];
-      if (!IDS_WANTED.has(id) || !ALL_CODES.has(code)) continue;
-
-      let value = null;
-      for (let j = tokens.length - 1; j > iCode; j--) {
-        const t = tokens[j];
-        if (t === "--" || t === "-") { value = "Sin Información"; break; }
-        if (/^N\/?A\.?$/i.test(t) || /^N\.A\.?$/i.test(t)) { value = "Sin Información"; break; }
-        if (t.toLowerCase() === "información" && j > iCode + 1 && tokens[j - 1].toLowerCase() === "sin") {
-          value = "Sin Información"; break; }
-        if (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, ""))) { value = t; break; }
-      }
-      if (!value) continue;
-      if (String(value).trim() === String(id)) continue; // evita que el ID se use como valor
-
-      out.push({ id, codigo: code, valorRaw: value });
     }
   }
 
@@ -271,7 +281,6 @@ export default async function handler(req, res) {
     idsTabla.forEach(r => { r.puntaje = scored?.pts?.[r.id] ?? null; });
 
     // === OVERRIDES ESPECIALES ===
-    // ID 9 con "--"/"Sin Información" => puntaje -19 (solo metodología sin atrasos)
     if (metodo === "sin") {
       const row9 = idsTabla.find(r => r.id === 9);
       if (row9 && (row9.valor === "Sin Información" || String(row9.valor).trim() === "--")) {
@@ -281,7 +290,6 @@ export default async function handler(req, res) {
         puntajeTotal = puntajeTotal - prev + (-19);
       }
     }
-    // ID 1 con "--"/"Sin Información" => puntaje 53 (en cualquier metodología)
     {
       const row1 = idsTabla.find(r => r.id === 1);
       if (row1 && (row1.valor === "Sin Información" || String(row1.valor).trim() === "--")) {
@@ -291,7 +299,6 @@ export default async function handler(req, res) {
         puntajeTotal = puntajeTotal - prev + 53;
       }
     }
-    // ID 14 con "--"/"Sin Información" => 53 (sin atraso) / 49 (con atrasos)
     {
       const row14 = idsTabla.find(r => r.id === 14);
       if (row14 && (row14.valor === "Sin Información" || String(row14.valor).trim() === "--")) {
@@ -302,7 +309,6 @@ export default async function handler(req, res) {
         puntajeTotal = puntajeTotal - prev + forced;
       }
     }
-    // ID 17 con "--"/"Sin Información" => puntaje 58
     {
       const row17 = idsTabla.find(r => r.id === 17);
       if (row17 && (row17.valor === "Sin Información" || String(row17.valor).trim() === "--")) {
