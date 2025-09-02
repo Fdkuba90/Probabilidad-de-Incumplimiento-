@@ -62,7 +62,7 @@ function pickNearest(tokens, xRef, pred) {
  * 1) Si encuentra encabezados “Identificador… / Código… / Valor…”, usa sus X
  *    y toma por cada renglón el token más cercano dentro de cada BANDA de columna.
  * 2) Si no hay encabezados, cae al método “derecha→izquierda” como fallback.
- *    (AQUÍ ES DONDE AHORA CAPTURA MÚLTIPLES TRIPLETES POR RENGLÓN)
+ *    (Incluye rescate específico para ID 1 cuando los valores están al extremo derecho)
  */
 async function extractCalificadorRows(pdfBuffer) {
   let PDFParserMod = null;
@@ -161,10 +161,23 @@ async function extractCalificadorRows(pdfBuffer) {
       }
 
       // 2) Fallback: detectar “ID CÓDIGO ... valor(derecha)”
-      //    *** MODIFICADO: ahora captura MÚLTIPLES tripletes por renglón ***
       const tokens = cells.flatMap(c => c.s.split(/\s+/)).filter(Boolean);
       if (tokens.length < 3) continue;
 
+      // --- RESCATE ESPECÍFICO PARA ID 1 (BK12_NUM_CRED) ---
+      if (tokens.includes("1") && tokens.includes("BK12_NUM_CRED")) {
+        const rightNum = [...tokens].reverse().find(
+          (t) => t !== "1" && (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, "")))
+        );
+        if (rightNum) {
+          out.push({ id: 1, codigo: "BK12_NUM_CRED", valorRaw: rightNum });
+          // no "continue": dejamos que el parser también procese el resto de IDs;
+          // la deduplicación posterior conservará la primera ocurrencia por ID.
+        }
+      }
+      // -----------------------------------------------------
+
+      // fallback multi-triplete (ID, CODE, VALUE) recorriendo la línea
       let k = 0;
       while (k < tokens.length - 2) {
         if (isIdToken(tokens[k]) && isCodeToken(tokens[k + 1])) {
@@ -182,8 +195,7 @@ async function extractCalificadorRows(pdfBuffer) {
                 value = "Sin Información"; j++; break;
               }
               if (isIdToken(t) && j + 1 < tokens.length && isCodeToken(tokens[j + 1])) {
-                // llegó otro ID+CODE sin valor claro para el anterior
-                break;
+                break; // llegó otro ID+CODE sin valor claro
               }
               const tClean = t.replace(/[$%]/g, "");
               if (isNumberLike(t) || isNumberLike(tClean)) { value = t; j++; break; }
@@ -191,7 +203,7 @@ async function extractCalificadorRows(pdfBuffer) {
             if (value && String(value).trim() !== String(id)) {
               out.push({ id, codigo: code, valorRaw: value });
             }
-            k = j; // continuar después del valor hallado
+            k = j;
             continue;
           }
         }
@@ -357,3 +369,4 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "INTERNAL_ERROR" });
   }
 }
+
