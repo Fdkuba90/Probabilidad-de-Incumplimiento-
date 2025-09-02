@@ -62,7 +62,6 @@ function pickNearest(tokens, xRef, pred) {
  * 1) Si encuentra encabezados “Identificador… / Código… / Valor…”, usa sus X
  *    y toma por cada renglón el token más cercano dentro de cada BANDA de columna.
  * 2) Si no hay encabezados, cae al método “derecha→izquierda” como fallback.
- *    (Incluye rescate específico para ID 1 cuando los valores están al extremo derecho)
  */
 async function extractCalificadorRows(pdfBuffer) {
   let PDFParserMod = null;
@@ -132,6 +131,9 @@ async function extractCalificadorRows(pdfBuffer) {
             /^(Sin|Información)$/i.test(s)
         );
 
+        // Bandera: el valor proviene de la BANDA de Valor
+        let valueFromValueBand = !!valTk;
+
         let value = valTk?.s ?? null;
         if (!value) {
           const rightMost = [...bandValue].reverse().find(c =>
@@ -139,6 +141,8 @@ async function extractCalificadorRows(pdfBuffer) {
             /^N\/?A\.?$/i.test(c.s) || /^N\.A\.?$/i.test(c.s)
           );
           value = rightMost?.s ?? null;
+          // aunque tomemos el “rightMost”, sigue siendo de la banda de valor
+          if (rightMost) valueFromValueBand = true;
         } else {
           const sinIdx = bandValue.findIndex(c => /^(Sin)$/i.test(c.s));
           if (sinIdx >= 0 && bandValue[sinIdx + 1] && /^(Información)$/i.test(bandValue[sinIdx + 1].s)) {
@@ -146,8 +150,16 @@ async function extractCalificadorRows(pdfBuffer) {
           }
         }
 
-        if (value === "--" || value === "-" || /^N\/?A\.?$/i.test(value) || /^N\.A\.?$/i.test(value)) value = "Sin Información";
-        if (idTk && value && String(value).trim() === String(idTk.s).trim()) value = null;
+        // Normalizaciones
+        if (value === "--" || value === "-" || /^N\/?A\.?$/i.test(value) || /^N\.A\.?$/i.test(value)) {
+          value = "Sin Información";
+        }
+
+        // *** ARREGLO: No descartar cuando el valor (p.ej. "1") coincide con el ID
+        // si proviene de la banda de Valor. Solo aplica la protección si NO vino de ahí.
+        if (idTk && !valueFromValueBand && value && String(value).trim() === String(idTk.s).trim()) {
+          value = null;
+        }
 
         if (idTk && codeTk && value != null) {
           const id = Number(idTk.s);
@@ -164,51 +176,29 @@ async function extractCalificadorRows(pdfBuffer) {
       const tokens = cells.flatMap(c => c.s.split(/\s+/)).filter(Boolean);
       if (tokens.length < 3) continue;
 
-      // --- RESCATE ESPECÍFICO PARA ID 1 (BK12_NUM_CRED) ---
-      if (tokens.includes("1") && tokens.includes("BK12_NUM_CRED")) {
-        const rightNum = [...tokens].reverse().find(
-          (t) => t !== "1" && (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, "")))
-        );
-        if (rightNum) {
-          out.push({ id: 1, codigo: "BK12_NUM_CRED", valorRaw: rightNum });
-          // no "continue": dejamos que el parser también procese el resto de IDs;
-          // la deduplicación posterior conservará la primera ocurrencia por ID.
-        }
+      let iId = -1, iCode = -1;
+      for (let i = 0; i < Math.min(tokens.length - 2, 8); i++) {
+        if (isIdToken(tokens[i]) && isCodeToken(tokens[i + 1])) { iId = i; iCode = i + 1; break; }
       }
-      // -----------------------------------------------------
+      if (iId === -1) continue;
 
-      // fallback multi-triplete (ID, CODE, VALUE) recorriendo la línea
-      let k = 0;
-      while (k < tokens.length - 2) {
-        if (isIdToken(tokens[k]) && isCodeToken(tokens[k + 1])) {
-          const id = Number(tokens[k]);
-          const code = tokens[k + 1];
+      const id = Number(tokens[iId]);
+      const code = tokens[iCode];
+      if (!IDS_WANTED.has(id) || !ALL_CODES.has(code)) continue;
 
-          if (IDS_WANTED.has(id) && ALL_CODES.has(code)) {
-            let value = null;
-            let j = k + 2;
-            for (; j < tokens.length; j++) {
-              const t = tokens[j];
-              if (t === "--" || t === "-") { value = "Sin Información"; j++; break; }
-              if (/^N\/?A\.?$/i.test(t) || /^N\.A\.?$/i.test(t)) { value = "Sin Información"; j++; break; }
-              if (t.toLowerCase() === "información" && j > k + 2 && tokens[j - 1].toLowerCase() === "sin") {
-                value = "Sin Información"; j++; break;
-              }
-              if (isIdToken(t) && j + 1 < tokens.length && isCodeToken(tokens[j + 1])) {
-                break; // llegó otro ID+CODE sin valor claro
-              }
-              const tClean = t.replace(/[$%]/g, "");
-              if (isNumberLike(t) || isNumberLike(tClean)) { value = t; j++; break; }
-            }
-            if (value && String(value).trim() !== String(id)) {
-              out.push({ id, codigo: code, valorRaw: value });
-            }
-            k = j;
-            continue;
-          }
-        }
-        k += 1;
+      let value = null;
+      for (let j = tokens.length - 1; j > iCode; j--) {
+        const t = tokens[j];
+        if (t === "--" || t === "-") { value = "Sin Información"; break; }
+        if (/^N\/?A\.?$/i.test(t) || /^N\.A\.?$/i.test(t)) { value = "Sin Información"; break; }
+        if (t.toLowerCase() === "información" && j > iCode + 1 && tokens[j - 1].toLowerCase() === "sin") {
+          value = "Sin Información"; break; }
+        if (isNumberLike(t) || isNumberLike(t.replace(/[$%]/g, ""))) { value = t; break; }
       }
+      if (!value) continue;
+      if (String(value).trim() === String(id)) continue; // evita que el ID se use como valor
+
+      out.push({ id, codigo: code, valorRaw: value });
     }
   }
 
